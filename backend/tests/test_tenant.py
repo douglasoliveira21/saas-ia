@@ -15,3 +15,13 @@ def test_web_sources_are_guaranteed_without_duplicating_existing_links():
     assert "## Fontes consultadas" in enriched
     assert "[Fonte B](https://example.com/b)" in enriched
 
+
+def test_sports_results_must_match_both_teams():
+    from app.main import filter_sports_results
+    results = [
+        {"title": "Los Angeles Lakers x Los Angeles Clippers", "url": "https://example.com/la", "content": ""},
+        {"title": "New Orleans Pelicans vs Cleveland Cavaliers", "url": "https://nba.com/game/nop-cle", "content": "Pelicans 66, Cavaliers 62"},
+    ]
+    filtered = filter_sports_results("qual o placar do jogo pelicans x cavaliers", results)
+    assert [item["url"] for item in filtered] == ["https://nba.com/game/nop-cle"]
+

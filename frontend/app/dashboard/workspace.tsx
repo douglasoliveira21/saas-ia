@@ -70,6 +70,7 @@ export default function Workspace() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState("Carregando seu workspace...");
   const [error, setError] = useState("");
   const [settings, setSettings] = useState<Setting | null>(null);
   const [profile, setProfile] = useState(false);
@@ -90,7 +91,8 @@ export default function Workspace() {
           setConversations(c);
           setFolders(f);
         })
-        .catch(() => router.push("/login")),
+        .catch(() => router.push("/login"))
+        .finally(() => setLoading("")),
     [router],
   );
   useEffect(() => {
@@ -114,22 +116,29 @@ export default function Workspace() {
     return () => document.removeEventListener("keydown", handler);
   }, []);
   async function open(c: Conversation) {
-    setSelected(c.id);
-    setFolderId(c.folder_id || "");
-    setMobile(false);
-    const history: ChatMessage[] = await call(`/conversations/${c.id}/messages`);
-    const token = localStorage.getItem("access_token") || "";
-    const hydrated = await Promise.all(
-      history.map(async (message) => {
-        if (!message.image) return message;
-        const response = await fetch(API + message.image, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!response.ok) return { ...message, image: undefined };
-        return { ...message, image: URL.createObjectURL(await response.blob()) };
-      }),
-    );
-    setMessages(hydrated);
+    setLoading("Abrindo conversa...");
+    try {
+      setSelected(c.id);
+      setFolderId(c.folder_id || "");
+      setMobile(false);
+      const history: ChatMessage[] = await call(`/conversations/${c.id}/messages`);
+      const token = localStorage.getItem("access_token") || "";
+      const hydrated = await Promise.all(
+        history.map(async (message) => {
+          if (!message.image) return message;
+          const response = await fetch(API + message.image, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) return { ...message, image: undefined };
+          return { ...message, image: URL.createObjectURL(await response.blob()) };
+        }),
+      );
+      setMessages(hydrated);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading("");
+    }
   }
   function fresh() {
     setSelected(undefined);
@@ -139,6 +148,7 @@ export default function Workspace() {
     setMobile(false);
   }
   async function patch(id: string, body: object) {
+    setLoading("Salvando alteração...");
     try {
       await call(`/conversations/${id}`, {
         method: "PATCH",
@@ -147,28 +157,33 @@ export default function Workspace() {
       load();
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      setLoading("");
     }
   }
   async function remove(id: string) {
     if (!confirm("Excluir esta conversa e todas as mensagens?")) return;
-    await call(`/conversations/${id}`, { method: "DELETE" });
-    if (selected === id) fresh();
-    load();
+    setLoading("Excluindo conversa...");
+    try {
+      await call(`/conversations/${id}`, { method: "DELETE" });
+      if (selected === id) fresh();
+      await load();
+    } finally { setLoading(""); }
   }
   async function addFolder(e: React.FormEvent) {
     e.preventDefault();
     if (!folderName.trim()) return;
-    const f = await call("/folders", {
-      method: "POST",
-      body: JSON.stringify({
-        name: folderName,
-        shared: false,
-        permissions: {},
-      }),
-    });
-    setFolderName("");
-    setFolderId(f.id);
-    load();
+    setLoading("Criando pasta...");
+    try {
+      const f = await call("/folders", {
+        method: "POST",
+        body: JSON.stringify({ name: folderName, shared: false, permissions: {} }),
+      });
+      setFolderName("");
+      setFolderId(f.id);
+      await load();
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoading(""); }
   }
   async function send(e: React.FormEvent) {
     e.preventDefault();
@@ -242,6 +257,7 @@ export default function Workspace() {
     pct = Math.min(100, (used / total) * 100);
   return (
     <main className="flex h-screen overflow-hidden bg-white text-zinc-950">
+      {loading && <LoadingOverlay label={loading} />}
       <button
         onClick={() => setMobile(true)}
         className="fixed left-3 top-3 z-30 rounded-lg border bg-white p-2 lg:hidden"
@@ -428,8 +444,8 @@ export default function Workspace() {
                 )}
                 {m.content}
                 {m.role === "assistant" && busy && !m.content && (
-                  <span className="animate-pulse text-zinc-400">
-                    Pensando...
+                  <span className="flex items-center gap-2 text-zinc-400">
+                    <Spinner /> Pensando...
                   </span>
                 )}
               </div>
@@ -474,7 +490,7 @@ export default function Workspace() {
               disabled={busy || !text.trim()}
               className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300"
             >
-              <Send size={17} />
+              {busy ? <Spinner className="border-zinc-500 border-t-white" /> : <Send size={17} />}
             </button>
           </div>
           {file && (
@@ -533,6 +549,19 @@ export default function Workspace() {
         />
       )}
     </main>
+  );
+}
+function Spinner({ className = "" }: { className?: string }) {
+  return <span className={`inline-block h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-950 ${className}`} />;
+}
+function LoadingOverlay({ label }: { label: string }) {
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-white/75 backdrop-blur-[2px]" role="status" aria-live="polite">
+      <div className="flex flex-col items-center rounded-2xl border border-zinc-200 bg-white px-8 py-6 shadow-xl">
+        <Spinner className="h-8 w-8" />
+        <p className="mt-3 text-sm font-medium text-zinc-700">{label}</p>
+      </div>
+    </div>
   );
 }
 function DropSection({
@@ -769,12 +798,15 @@ function AgentPanel({ reload }: { reload: () => void }) {
   >([]);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const load = useCallback(() => call("/agents").then(setItems), []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(() => { setLoading(true); return call("/agents").then(setItems).finally(() => setLoading(false)); }, []);
   useEffect(() => {
     load();
   }, [load]);
   async function add(e: React.FormEvent) {
     e.preventDefault();
+    setSaving(true);
     await call("/agents", {
       method: "POST",
       body: JSON.stringify({
@@ -788,8 +820,9 @@ function AgentPanel({ reload }: { reload: () => void }) {
     });
     setName("");
     setDescription("");
-    load();
+    await load();
     reload();
+    setSaving(false);
   }
   return (
     <div>
@@ -814,11 +847,12 @@ function AgentPanel({ reload }: { reload: () => void }) {
           value={description}
           onChange={(e) => setDescription(e.target.value)}
         />
-        <button className="rounded-xl bg-zinc-950 py-3 text-sm text-white sm:col-span-2">
-          Criar agente
+        <button disabled={saving} className="flex items-center justify-center gap-2 rounded-xl bg-zinc-950 py-3 text-sm text-white disabled:bg-zinc-400 sm:col-span-2">
+          {saving && <Spinner className="border-zinc-500 border-t-white" />} Criar agente
         </button>
       </form>
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        {loading && <PanelLoading />}
         {items.map((a) => (
           <div key={a.id} className="rounded-xl border p-4">
             <p className="font-medium">{a.name}</p>
@@ -831,7 +865,8 @@ function AgentPanel({ reload }: { reload: () => void }) {
 }
 function MemoryPanel() {
   const [items, setItems] = useState<{ id: string; value: string }[]>([]);
-  const load = useCallback(() => call("/memories").then(setItems), []);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(() => { setLoading(true); return call("/memories").then(setItems).finally(() => setLoading(false)); }, []);
   useEffect(() => {
     load();
   }, [load]);
@@ -846,6 +881,7 @@ function MemoryPanel() {
         Preferências usadas em futuras conversas. Só você pode visualizá-las.
       </p>
       <div className="mt-6 overflow-hidden rounded-2xl border">
+        {loading && <PanelLoading />}
         {items.map((m) => (
           <div key={m.id} className="flex gap-3 border-b p-4 last:border-0">
             <BrainCircuit size={17} />
@@ -855,7 +891,7 @@ function MemoryPanel() {
             </button>
           </div>
         ))}
-        {!items.length && (
+        {!loading && !items.length && (
           <p className="p-10 text-center text-sm text-zinc-400">
             Nenhuma memória registrada.
           </p>
@@ -870,18 +906,22 @@ function TeamPanel() {
   >([]);
   const [email, setEmail] = useState("");
   const [link, setLink] = useState("");
-  const load = useCallback(() => call("/team").then(setItems), []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(() => { setLoading(true); return call("/team").then(setItems).finally(() => setLoading(false)); }, []);
   useEffect(() => {
     load();
   }, [load]);
   async function invite(e: React.FormEvent) {
     e.preventDefault();
+    setSaving(true);
     const x = await call("/team/invite", {
       method: "POST",
       body: JSON.stringify({ email, role: "member" }),
     });
     setLink(x.invite_url);
     setEmail("");
+    setSaving(false);
   }
   return (
     <div>
@@ -895,8 +935,8 @@ function TeamPanel() {
           onChange={(e) => setEmail(e.target.value)}
           required
         />
-        <button className="rounded-xl bg-zinc-950 px-5 text-sm text-white">
-          Convidar
+        <button disabled={saving} className="flex items-center gap-2 rounded-xl bg-zinc-950 px-5 text-sm text-white disabled:bg-zinc-400">
+          {saving && <Spinner className="border-zinc-500 border-t-white" />} Convidar
         </button>
       </form>
       {link && (
@@ -905,6 +945,7 @@ function TeamPanel() {
         </p>
       )}
       <div className="mt-5 overflow-hidden rounded-2xl border">
+        {loading && <PanelLoading />}
         {items.map((m) => (
           <div
             key={m.id}
@@ -928,18 +969,22 @@ function FilesPanel({ reload }: { reload: () => void }) {
   const [items, setItems] = useState<
     { id: string; name: string; size: number }[]
   >([]);
-  const load = useCallback(() => call("/files").then(setItems), []);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const load = useCallback(() => { setLoading(true); return call("/files").then(setItems).finally(() => setLoading(false)); }, []);
   useEffect(() => {
     load();
   }, [load]);
   async function upload(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    setSaving(true);
     const body = new FormData();
     body.append("file", f);
     await call("/files", { method: "POST", body });
-    load();
+    await load();
     reload();
+    setSaving(false);
   }
   return (
     <div>
@@ -951,12 +996,13 @@ function FilesPanel({ reload }: { reload: () => void }) {
           </p>
         </div>
         <label className="flex cursor-pointer items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 text-sm text-white">
-          <Upload size={16} />
-          Enviar
+          {saving ? <Spinner className="border-zinc-500 border-t-white" /> : <Upload size={16} />}
+          {saving ? "Enviando..." : "Enviar"}
           <input type="file" className="hidden" onChange={upload} />
         </label>
       </div>
       <div className="mt-6 overflow-hidden rounded-2xl border">
+        {loading && <PanelLoading />}
         {items.map((f) => (
           <div key={f.id} className="flex gap-3 border-b p-4 last:border-0">
             <FileText size={18} />
@@ -969,4 +1015,7 @@ function FilesPanel({ reload }: { reload: () => void }) {
       </div>
     </div>
   );
+}
+function PanelLoading() {
+  return <div className="col-span-full flex items-center justify-center gap-3 p-10 text-sm text-zinc-500"><Spinner /> Carregando...</div>;
 }

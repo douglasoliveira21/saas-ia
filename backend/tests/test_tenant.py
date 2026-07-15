@@ -41,3 +41,11 @@ def test_spreadsheet_spec_accepts_json_code_fence():
     result = spreadsheet_spec('```json\n{"filename":"teste.xlsx","sheets":[{"name":"Dados","headers":["Item"],"rows":[["A"]]}]}\n```')
     assert result["filename"] == "teste.xlsx"
 
+
+def test_requested_file_extension_supports_common_formats():
+    from app.main import requested_file_extension
+    assert requested_file_extension("crie um documento Word") == "docx"
+    assert requested_file_extension("gere uma apresentação PowerPoint") == "pptx"
+    assert requested_file_extension("salve como relatorio.pdf") == "pdf"
+    assert requested_file_extension("crie um arquivo JSON") == "json"
+

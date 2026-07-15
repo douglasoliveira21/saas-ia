@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { API, call } from "../lib/api";
+import { API, call, getAccessToken } from "../lib/api";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
@@ -212,7 +212,8 @@ export default function Workspace() {
         { id: crypto.randomUUID(), role: "user", content: prompt },
         { id: aid, role: "assistant", content: "" },
       ]);
-      const token = localStorage.getItem("access_token") || "";
+      const token = await getAccessToken();
+      if (!token) throw new Error("Sua sessão expirou. Entre novamente.");
       const socket = new WebSocket(
         API.replace(/^http/, "ws").replace(/\/api\/v1\/?$/, "") +
           `/ws/chat?token=${encodeURIComponent(token)}`,

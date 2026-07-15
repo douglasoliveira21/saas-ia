@@ -2,6 +2,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { API, call } from "../lib/api";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import {
   Bot,
   BrainCircuit,
@@ -424,7 +428,7 @@ export default function Workspace() {
                 </span>
               )}
               <div
-                className={`max-w-[84%] whitespace-pre-wrap text-sm leading-7 ${m.role === "user" ? "rounded-3xl bg-zinc-100 px-5 py-3" : ""}`}
+                className={`max-w-[84%] text-sm leading-7 ${m.role === "user" ? "whitespace-pre-wrap rounded-3xl bg-zinc-100 px-5 py-3" : "min-w-0 flex-1"}`}
               >
                 {m.image && (
                   <button
@@ -443,7 +447,7 @@ export default function Workspace() {
                     </span>
                   </button>
                 )}
-                {m.content}
+                {m.role === "assistant" ? <MarkdownAnswer content={m.content} /> : m.content}
                 {m.role === "assistant" && busy && !m.content && (
                   <span className="flex items-center gap-2 text-zinc-400">
                     <Spinner /> Pensando...
@@ -555,6 +559,37 @@ export default function Workspace() {
 }
 function Spinner({ className = "" }: { className?: string }) {
   return <span className={`inline-block h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-950 ${className}`} />;
+}
+function MarkdownAnswer({ content }: { content: string }) {
+  return (
+    <div className="ai-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, rehypeSanitize]}
+        components={{
+          h1: ({ children }) => <h1 className="mb-4 mt-7 text-2xl font-semibold first:mt-0">{children}</h1>,
+          h2: ({ children }) => <h2 className="mb-3 mt-7 text-xl font-semibold first:mt-0">{children}</h2>,
+          h3: ({ children }) => <h3 className="mb-2 mt-6 text-base font-semibold first:mt-0">{children}</h3>,
+          p: ({ children }) => <p className="my-3 first:mt-0 last:mb-0">{children}</p>,
+          ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-6">{children}</ul>,
+          ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-6">{children}</ol>,
+          blockquote: ({ children }) => <blockquote className="my-4 border-l-4 border-zinc-300 bg-zinc-50 py-2 pl-4 text-zinc-600">{children}</blockquote>,
+          a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline decoration-blue-300 underline-offset-2 hover:text-blue-800">{children}</a>,
+          code: ({ children, className }) => className ? <code className={`${className} block overflow-x-auto rounded-xl bg-zinc-950 p-4 font-mono text-[13px] leading-6 text-zinc-100`}>{children}</code> : <code className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[13px] text-zinc-900">{children}</code>,
+          pre: ({ children }) => <pre className="my-4 overflow-hidden rounded-xl">{children}</pre>,
+          table: ({ children }) => <div className="my-5 overflow-x-auto rounded-xl border border-zinc-200"><table className="w-full border-collapse text-left text-sm">{children}</table></div>,
+          th: ({ children }) => <th className="border-b border-zinc-200 bg-zinc-50 px-4 py-3 font-semibold">{children}</th>,
+          td: ({ children }) => <td className="border-b border-zinc-100 px-4 py-3 align-top last:border-b-0">{children}</td>,
+          hr: () => <hr className="my-6 border-zinc-200" />,
+          strong: ({ children }) => <strong className="font-semibold text-zinc-950">{children}</strong>,
+          em: ({ children }) => <em className="italic text-zinc-700">{children}</em>,
+          u: ({ children }) => <u className="decoration-zinc-500 underline-offset-2">{children}</u>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 }
 function LoadingOverlay({ label }: { label: string }) {
   return (

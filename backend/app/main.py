@@ -16,6 +16,20 @@ app=FastAPI(title=settings.app_name,version="1.0.0",docs_url="/docs")
 app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
 PLANS={"starter":{"tokens":500000,"users":5,"agents":3},"professional":{"tokens":3000000,"users":25,"agents":15},"enterprise":{"tokens":20000000,"users":250,"agents":100}}
+@app.on_event("startup")
+def ensure_superadmin():
+    """Create or synchronize the environment-configured platform administrator."""
+    if not settings.superadmin_email or not settings.superadmin_password: return
+    db=SessionLocal()
+    try:
+        user=db.scalar(select(User).where(User.email==settings.superadmin_email).limit(1))
+        if not user:
+            user=User(company_id=None,name="Super Admin",email=settings.superadmin_email,password_hash=hash_password(settings.superadmin_password),role="superadmin")
+            db.add(user)
+        else:
+            user.role="superadmin"; user.status="active"; user.password_hash=hash_password(settings.superadmin_password)
+        db.commit()
+    finally: db.close()
 def refresh_pair(user,db):
     raw=random_token(); db.add(RefreshToken(user_id=user.id,token_hash=token_hash(raw),expires_at=datetime.now(timezone.utc)+timedelta(days=30))); db.commit(); return {"access_token":create_token(user),"refresh_token":raw,"token_type":"bearer"}
 def dump(obj): return {c.name:getattr(obj,c.name) for c in obj.__table__.columns}
@@ -28,7 +42,7 @@ def health(): return {"status":"ok","service":settings.app_name}
 @app.post(API+"/auth/register",status_code=201)
 def register(data:Register,db:Session=Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"E-mail já cadastrado")
-    company=Company(name=data.company_name,document=data.document,email=data.email); db.add(company); db.flush()
+    company=Company(name=data.company_name,document=(data.document or "").strip() or None,email=data.email); db.add(company); db.flush()
     user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.commit(); return refresh_pair(user,db)
 @app.post(API+"/auth/login")
 def login(data:Login,db:Session=Depends(get_db)):
@@ -41,9 +55,15 @@ def refresh(data:Refresh,db:Session=Depends(get_db)):
     if not item or item.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc): raise HTTPException(401,"Refresh token inválido")
     item.revoked=True; user=db.get(User,item.user_id); db.commit(); return refresh_pair(user,db)
 @app.get(API+"/me")
-def me(user=Depends(current_user),db:Session=Depends(get_db)): return {**dump(user),"company":dump(db.get(Company,user.company_id))}
+def me(user=Depends(current_user),db:Session=Depends(get_db)):
+    company=db.get(Company,user.company_id) if user.company_id else None
+    return {**dump(user),"company":dump(company) if company else None}
 @app.get(API+"/dashboard")
 def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
+    if user.role=="superadmin":
+        usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0))).one()
+        counts={"users":db.scalar(select(func.count()).select_from(User)),"agents":db.scalar(select(func.count()).select_from(Agent)),"conversations":db.scalar(select(func.count()).select_from(Conversation)),"files":db.scalar(select(func.count()).select_from(File)),"companies":db.scalar(select(func.count()).select_from(Company))}
+        return {"company":{"name":"Administração da plataforma","plan":"enterprise","status":"active"},"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS["enterprise"],"is_superadmin":True}
     cid=user.company_id; company=db.get(Company,cid); usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0)).where(UsageLog.company_id==cid)).one()
     counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
     return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}

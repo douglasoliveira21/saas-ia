@@ -2,6 +2,7 @@ import asyncio, base64, logging, pathlib, re, secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 import httpx, stripe
@@ -111,7 +112,21 @@ def delete_folder(item_id:str,user=Depends(current_user),db:Session=Depends(get_
 @app.get(API+"/conversations")
 def conversations(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Conversation).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id).order_by(Conversation.created_at.desc())).all()]
 @app.get(API+"/conversations/{item_id}/messages")
-def messages(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): tenant_get(db,Conversation,item_id,user); return [dump(x) for x in db.scalars(select(Message).where(Message.conversation_id==item_id).order_by(Message.created_at)).all()]
+def messages(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+    tenant_get(db,Conversation,item_id,user)
+    items=db.scalars(select(Message).where(Message.conversation_id==item_id).order_by(Message.created_at)).all()
+    result=[]
+    for item in items:
+        payload=dump(item); payload.pop("image_path",None); payload["image"]=f"/messages/{item.id}/image" if item.image_path else None; result.append(payload)
+    return result
+
+@app.get(API+"/messages/{item_id}/image")
+def message_image(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+    item=db.scalar(select(Message).join(Conversation,Conversation.id==Message.conversation_id).where(Message.id==item_id,Conversation.company_id==user.company_id,Conversation.user_id==user.id))
+    if not item or not item.image_path: raise HTTPException(404,"Imagem não encontrada")
+    path=pathlib.Path(item.image_path)
+    if not path.is_file(): raise HTTPException(404,"Arquivo da imagem não encontrado")
+    return FileResponse(path,media_type="image/png",filename="solvitsoft-imagem.png")
 @app.get(API+"/memories")
 def memories(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc())).all()]
 @app.delete(API+"/memories/{item_id}",status_code=204)
@@ -178,8 +193,9 @@ async def ai_answer(data:ChatIn,user,db):
             if res.is_error:
                 logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); image_data=None; answer=f"Não consegui gerar a imagem agora (DeepInfra respondeu {res.status_code}). Verifique o modelo de imagem e o saldo da conta."
             else:
-                generated=res.json()["data"][0]; image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
-        db.add(Message(conversation_id=conv.id,role="assistant",content=answer)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
+                generated=res.json()["data"][0]; raw=base64.b64decode(generated["b64_json"]); image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
+                image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}.png"; image_path.write_bytes(raw)
+        db.add(Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
         return {"conversation_id":conv.id,"message":answer,"model":settings.image_ai_model,"route":"image_generation","image":image_data,"usage":{"input":0,"output":0}}
     history=db.scalars(select(Message).where(Message.conversation_id==conv.id).order_by(Message.created_at.desc()).limit(20)).all()
     api_messages=[{"role":"system","content":prompt}]+[{"role":m.role,"content":m.content} for m in reversed(history)]

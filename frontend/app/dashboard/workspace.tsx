@@ -117,7 +117,19 @@ export default function Workspace() {
     setSelected(c.id);
     setFolderId(c.folder_id || "");
     setMobile(false);
-    setMessages(await call(`/conversations/${c.id}/messages`));
+    const history: ChatMessage[] = await call(`/conversations/${c.id}/messages`);
+    const token = localStorage.getItem("access_token") || "";
+    const hydrated = await Promise.all(
+      history.map(async (message) => {
+        if (!message.image) return message;
+        const response = await fetch(API + message.image, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!response.ok) return { ...message, image: undefined };
+        return { ...message, image: URL.createObjectURL(await response.blob()) };
+      }),
+    );
+    setMessages(hydrated);
   }
   function fresh() {
     setSelected(undefined);

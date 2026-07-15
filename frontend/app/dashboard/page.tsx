@@ -1,10 +1,10 @@
 "use client";
 import {useCallback,useEffect,useState} from "react";
 import {useRouter} from "next/navigation";
-import {Bot,Files,LayoutDashboard,LogOut,MessageSquare,Paperclip,Plus,Send,Sparkles,Trash2,Upload,Users,X} from "lucide-react";
+import {Bot,BrainCircuit,Files,LayoutDashboard,LogOut,MessageSquare,Paperclip,Plus,Send,Sparkles,Trash2,Upload,Users,X} from "lucide-react";
 import {API,call} from "../lib/api";
 
-type Tab="overview"|"conversations"|"agents"|"files"|"team";
+type Tab="overview"|"conversations"|"agents"|"files"|"team"|"memory";
 type Dash={company:{name:string;plan:string};counts:Record<string,number>;usage:{tokens:number;cost:number};limits:{tokens:number};is_superadmin?:boolean};
 type Conversation={id:string;title:string;folder_id:string|null;created_at:string};
 type Folder={id:string;name:string};
@@ -12,6 +12,7 @@ type ChatMessage={id:string;role:string;content:string;image?:string};
 type Agent={id:string;name:string;description:string;ai_model:string;system_prompt:string};
 type StoredFile={id:string;name:string;mime_type:string;size:number;created_at:string};
 type Member={id:string;name:string;email:string;role:string;status:string};
+type Memory={id:string;value:string;created_at:string};
 
 const field="w-full rounded-xl border border-line bg-ink px-4 py-3 text-sm outline-none focus:border-lime";
 const button="rounded-xl bg-lime px-5 py-3 text-sm font-semibold text-ink disabled:opacity-50";
@@ -23,7 +24,7 @@ export default function Dashboard(){
   const [error,setError]=useState("");
   const refresh=useCallback(()=>call("/dashboard").then(setData).catch(()=>router.push("/login")),[router]);
   useEffect(()=>{refresh()},[refresh]);
-  const nav:[Tab,string,typeof Bot][]=[["overview","Visão geral",LayoutDashboard],["conversations","Conversas",MessageSquare],["agents","Agentes",Bot],["files","Arquivos",Files],["team","Equipe",Users]];
+  const nav:[Tab,string,typeof Bot][]=[["overview","Visão geral",LayoutDashboard],["conversations","Conversas",MessageSquare],["agents","Agentes",Bot],["files","Arquivos",Files],["team","Equipe",Users],["memory","Memória",BrainCircuit]];
   return <main className="flex min-h-screen bg-ink">
     <aside className="hidden w-64 shrink-0 border-r border-line p-5 md:flex md:flex-col">
       <div className="flex items-center gap-2 text-lg font-bold"><span className="grid h-8 w-8 place-items-center rounded-lg bg-lime text-ink"><Sparkles size={17}/></span>SolvitSoft IA</div>
@@ -39,6 +40,7 @@ export default function Dashboard(){
       {tab==="agents"&&<Agents onError={setError} onChange={refresh}/>}
       {tab==="files"&&<FileManager onError={setError} onChange={refresh}/>}
       {tab==="team"&&<Team onError={setError} onChange={refresh}/>}
+      {tab==="memory"&&<MemoryManager onError={setError}/>}
     </section>
   </main>
 }
@@ -79,4 +81,11 @@ function Team({onError,onChange}:{onError:(v:string)=>void;onChange:()=>void}){
   const [items,setItems]=useState<Member[]>([]);const [email,setEmail]=useState("");const [role,setRole]=useState("member");const [invite,setInvite]=useState("");const load=useCallback(()=>call("/team").then(setItems).catch((e:Error)=>onError(e.message)),[onError]);useEffect(()=>{load()},[load]);
   async function send(e:React.FormEvent){e.preventDefault();try{const x=await call("/team/invite",{method:"POST",body:JSON.stringify({email,role})});setInvite(x.invite_url);setEmail("");onChange()}catch(e){onError((e as Error).message)}}
   return <div className="mt-8"><h2 className="text-xl font-semibold">Equipe</h2><p className="mt-1 text-sm text-zinc-500">Convide administradores e membros para sua empresa.</p><form onSubmit={send} className="glass mt-6 flex flex-col gap-3 rounded-2xl p-5 md:flex-row"><input className={field} type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="email@empresa.com" required/><select className={`${field} md:w-44`} value={role} onChange={e=>setRole(e.target.value)}><option value="member">Membro</option><option value="admin">Administrador</option></select><button className={`${button} whitespace-nowrap`}>Enviar convite</button></form>{invite&&<div className="mt-4 rounded-xl border border-lime/20 bg-lime/10 p-4 text-sm"><p className="text-lime">Convite criado. Copie e envie este link:</p><p className="mt-2 break-all text-zinc-300">{invite}</p></div>}<div className="glass mt-6 overflow-hidden rounded-2xl">{items.map(x=><div key={x.id} className="flex items-center gap-4 border-b border-line p-4 last:border-0"><span className="grid h-10 w-10 place-items-center rounded-full bg-zinc-800 text-sm font-semibold">{x.name.slice(0,1).toUpperCase()}</span><div className="min-w-0 flex-1"><p className="truncate text-sm">{x.name}</p><p className="truncate text-xs text-zinc-600">{x.email}</p></div><span className="rounded-full bg-zinc-800 px-3 py-1 text-xs capitalize text-zinc-400">{x.role}</span><span className="hidden text-xs text-lime sm:block">{x.status}</span></div>)}{!items.length&&<p className="p-10 text-center text-sm text-zinc-600">Nenhum membro encontrado.</p>}</div></div>
+}
+
+function MemoryManager({onError}:{onError:(v:string)=>void}){
+  const [items,setItems]=useState<Memory[]>([]);const load=useCallback(()=>call("/memories").then(setItems).catch((e:Error)=>onError(e.message)),[onError]);useEffect(()=>{load()},[load]);
+  async function remove(id:string){try{await call(`/memories/${id}`,{method:"DELETE"});load()}catch(e){onError((e as Error).message)}}
+  async function clear(){if(!confirm("Apagar todas as memórias pessoais? O histórico das conversas será mantido."))return;try{await call("/memories",{method:"DELETE"});load()}catch(e){onError((e as Error).message)}}
+  return <div className="mx-auto mt-8 max-w-3xl"><div className="flex items-start justify-between gap-4"><div><h2 className="text-2xl font-semibold text-zinc-950">Memória pessoal</h2><p className="mt-2 max-w-xl text-sm leading-6 text-zinc-500">A IA guarda preferências que você declara explicitamente e pode usá-las em novas conversas. Essas informações pertencem somente ao seu usuário.</p></div>{items.length>0&&<button onClick={clear} className="whitespace-nowrap rounded-xl border border-zinc-300 px-4 py-2 text-sm text-zinc-600 hover:bg-zinc-50">Apagar tudo</button>}</div><div className="mt-7 overflow-hidden rounded-2xl border border-zinc-200 bg-white">{items.map(x=><div key={x.id} className="flex items-start gap-4 border-b border-zinc-100 p-5 last:border-0"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-zinc-100"><BrainCircuit size={17}/></span><div className="flex-1"><p className="text-sm leading-6 text-zinc-800">{x.value}</p><p className="mt-1 text-xs text-zinc-400">Lembrado a partir de uma conversa</p></div><button aria-label="Apagar memória" onClick={()=>remove(x.id)} className="text-zinc-400 hover:text-red-600"><Trash2 size={17}/></button></div>)}{!items.length&&<div className="p-12 text-center"><BrainCircuit className="mx-auto text-zinc-300"/><p className="mt-4 text-sm font-medium text-zinc-700">Nenhuma preferência memorizada</p><p className="mt-2 text-xs text-zinc-400">Experimente dizer: “Eu prefiro respostas curtas e objetivas”.</p></div>}</div></div>
 }

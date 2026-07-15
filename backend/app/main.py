@@ -8,7 +8,7 @@ import httpx, stripe
 from pypdf import PdfReader
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory
 from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, MoveConversation, ChatIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
@@ -106,6 +106,17 @@ def delete_folder(item_id:str,user=Depends(current_user),db:Session=Depends(get_
 def conversations(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Conversation).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id).order_by(Conversation.created_at.desc())).all()]
 @app.get(API+"/conversations/{item_id}/messages")
 def messages(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): tenant_get(db,Conversation,item_id,user); return [dump(x) for x in db.scalars(select(Message).where(Message.conversation_id==item_id).order_by(Message.created_at)).all()]
+@app.get(API+"/memories")
+def memories(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc())).all()]
+@app.delete(API+"/memories/{item_id}",status_code=204)
+def delete_memory(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+    item=db.scalar(select(UserMemory).where(UserMemory.id==item_id,UserMemory.company_id==user.company_id,UserMemory.user_id==user.id))
+    if not item: raise HTTPException(404,"Memória não encontrada")
+    db.delete(item); db.commit()
+@app.delete(API+"/memories",status_code=204)
+def clear_memories(user=Depends(current_user),db:Session=Depends(get_db)):
+    for item in db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id)).all(): db.delete(item)
+    db.commit()
 @app.patch(API+"/conversations/{item_id}")
 def move_conversation(item_id:str,data:MoveConversation,user=Depends(current_user),db:Session=Depends(get_db)):
     item=tenant_get(db,Conversation,item_id,user)
@@ -134,11 +145,20 @@ async def ai_answer(data:ChatIn,user,db):
     if not data.conversation_id: db.add(conv); db.flush()
     agent_id=data.agent_id or conv.agent_id
     agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=agent.ai_model if agent else settings.default_ai_model; prompt=agent.system_prompt if agent else "Você é um assistente empresarial claro e útil."
+    personal=db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc()).limit(30)).all()
+    if personal: prompt+="\n\nMemórias confirmadas deste usuário. Use-as apenas quando forem relevantes e nunca invente novas:\n- "+"\n- ".join(x.value for x in personal)
+    previous=db.execute(select(Message.role,Message.content).join(Conversation,Conversation.id==Message.conversation_id).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id,Conversation.id!=conv.id).order_by(Message.created_at.desc()).limit(12)).all()
+    if previous: prompt+="\n\nContexto recente de outras conversas deste mesmo usuário (pode estar desatualizado):\n"+"\n".join(f"{role}: {content[:600]}" for role,content in reversed(previous))
     attached=[]
     if data.file_ids:
         attached=db.scalars(select(File).where(File.id.in_(data.file_ids),File.company_id==user.company_id)).all()
         if len(attached)!=len(set(data.file_ids)): raise HTTPException(404,"Um ou mais anexos não foram encontrados")
     db.add(Message(conversation_id=conv.id,role="user",content=data.message)); db.flush()
+    memory_pattern=re.compile(r"\b(meu nome é|pode me chamar de|eu gosto de|eu prefiro|prefiro|não gosto de|eu trabalho com|minha empresa (?:é|se chama)|sempre responda|quero que você)\b[^.!?\n]{2,220}",re.IGNORECASE)
+    for match in memory_pattern.finditer(data.message):
+        value=match.group(0).strip()
+        exists=db.scalar(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id,func.lower(UserMemory.value)==value.lower()))
+        if not exists: db.add(UserMemory(company_id=user.company_id,user_id=user.id,value=value))
     image_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|desenhe)\b.{0,45}\b(imagem|foto|fotografia|ilustração|arte|logo|banner)\b",data.message.lower()))
     if image_intent and not attached:
         if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None

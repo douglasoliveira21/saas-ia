@@ -41,4 +41,7 @@ class AgentFile(Base):
     __tablename__="agent_files"; agent_id: Mapped[str]=mapped_column(ForeignKey("agents.id",ondelete="CASCADE"),primary_key=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),primary_key=True)
 class UsageLog(Base):
     __tablename__="usage_logs"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id"),index=True); model: Mapped[str]=mapped_column(String(160)); input_tokens: Mapped[int]=mapped_column(Integer,default=0); output_tokens: Mapped[int]=mapped_column(Integer,default=0); cost: Mapped[float]=mapped_column(Float,default=0); audio_minutes: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
-
+class UserMemory(Base):
+    __tablename__="user_memories"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
+    value: Mapped[str]=mapped_column(Text); source: Mapped[str]=mapped_column(String(30),default="conversation"); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)

@@ -7,12 +7,14 @@ import {
   BrainCircuit,
   ChevronDown,
   CreditCard,
+  Download,
   FileText,
   Folder,
   FolderPlus,
   LayoutDashboard,
   LogOut,
   Menu,
+  Maximize2,
   MessageSquare,
   MoreHorizontal,
   Paperclip,
@@ -71,6 +73,7 @@ export default function Workspace() {
   const [error, setError] = useState("");
   const [settings, setSettings] = useState<Setting | null>(null);
   const [profile, setProfile] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
   const [mobile, setMobile] = useState(false);
   const [folderName, setFolderName] = useState("");
   const load = useCallback(
@@ -395,11 +398,21 @@ export default function Workspace() {
                 className={`max-w-[84%] whitespace-pre-wrap text-sm leading-7 ${m.role === "user" ? "rounded-3xl bg-zinc-100 px-5 py-3" : ""}`}
               >
                 {m.image && (
-                  <img
-                    src={m.image}
-                    alt="Imagem gerada"
-                    className="mb-4 max-h-[500px] rounded-2xl"
-                  />
+                  <button
+                    type="button"
+                    onClick={() => setPreview(m.image || null)}
+                    className="group relative mb-4 block overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50"
+                    title="Clique para ampliar"
+                  >
+                    <img
+                      src={m.image}
+                      alt="Imagem gerada"
+                      className="max-h-[500px] w-auto transition duration-300 group-hover:scale-[1.01]"
+                    />
+                    <span className="absolute bottom-3 right-3 grid h-9 w-9 place-items-center rounded-full bg-black/70 text-white opacity-0 backdrop-blur transition group-hover:opacity-100">
+                      <Maximize2 size={16} />
+                    </span>
+                  </button>
                 )}
                 {m.content}
                 {m.role === "assistant" && busy && !m.content && (
@@ -463,6 +476,38 @@ export default function Workspace() {
           )}
         </form>
       </section>
+      {preview && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/85 p-3 backdrop-blur-sm sm:p-8"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setPreview(null);
+          }}
+        >
+          <div className="relative flex max-h-full max-w-6xl flex-col items-center">
+            <img
+              src={preview}
+              alt="Visualização ampliada da imagem gerada"
+              className="max-h-[calc(100vh-110px)] max-w-full rounded-xl object-contain shadow-2xl"
+            />
+            <div className="mt-4 flex gap-2">
+              <a
+                href={preview}
+                download="solvitsoft-imagem.png"
+                className="flex items-center gap-2 rounded-full bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 shadow-lg"
+              >
+                <Download size={17} /> Baixar imagem
+              </a>
+              <button
+                type="button"
+                onClick={() => setPreview(null)}
+                className="flex items-center gap-2 rounded-full border border-white/30 bg-black/40 px-5 py-2.5 text-sm text-white"
+              >
+                <X size={17} /> Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {settings && (
         <SettingsModal
           tab={settings}

@@ -1,4 +1,4 @@
-import asyncio, base64, pathlib, re, secrets
+import asyncio, base64, logging, pathlib, re, secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,7 @@ from app.security import hash_password, verify_password, create_token, random_to
 from jose import jwt, JWTError
 
 app=FastAPI(title=settings.app_name,version="1.0.0",docs_url="/docs")
+logger=logging.getLogger("solvitsoft.ai")
 app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
 PLANS={"starter":{"tokens":500000,"users":5,"agents":3},"professional":{"tokens":3000000,"users":25,"agents":15},"enterprise":{"tokens":20000000,"users":250,"agents":100}}
@@ -163,15 +164,18 @@ async def ai_answer(data:ChatIn,user,db):
         value=match.group(0).strip()
         exists=db.scalar(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id,func.lower(UserMemory.value)==value.lower()))
         if not exists: db.add(UserMemory(company_id=user.company_id,user_id=user.id,value=value))
-    image_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|desenhe)\b.{0,45}\b(imagem|foto|fotografia|ilustração|arte|logo|banner)\b",data.message.lower()))
+    image_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|desenhe|desenhar)\b.{0,60}\b(imagem|iamgem|foto|fotografia|ilustração|ilustracao|arte|logo|banner|desenho)\b",data.message.lower()))
     if image_intent and not attached:
         if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
         else:
             async with httpx.AsyncClient(timeout=180) as client:
-                res=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}); res.raise_for_status(); generated=res.json()["data"][0]
-            image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
-        db.add(Message(conversation_id=conv.id,role="assistant",content=answer)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model="FLUX Schnell",input_tokens=0,output_tokens=0,cost=0)); db.commit()
-        return {"conversation_id":conv.id,"message":answer,"model":"FLUX Schnell","route":"image_generation","image":image_data,"usage":{"input":0,"output":0}}
+                res=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            if res.is_error:
+                logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); image_data=None; answer=f"Não consegui gerar a imagem agora (DeepInfra respondeu {res.status_code}). Verifique o modelo de imagem e o saldo da conta."
+            else:
+                generated=res.json()["data"][0]; image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
+        db.add(Message(conversation_id=conv.id,role="assistant",content=answer)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
+        return {"conversation_id":conv.id,"message":answer,"model":settings.image_ai_model,"route":"image_generation","image":image_data,"usage":{"input":0,"output":0}}
     history=db.scalars(select(Message).where(Message.conversation_id==conv.id).order_by(Message.created_at.desc()).limit(20)).all()
     api_messages=[{"role":"system","content":prompt}]+[{"role":m.role,"content":m.content} for m in reversed(history)]
     images=[x for x in attached if x.mime_type in {"image/png","image/jpeg","image/webp"}]

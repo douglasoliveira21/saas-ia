@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     deepinfra_api_key: str = ""
     deepinfra_base_url: str = "https://api.deepinfra.com/v1/openai"
     deepinfra_native_url: str = "https://api.deepinfra.com/v1/inference"
+    tavily_api_key: str = ""
+    tavily_base_url: str = "https://api.tavily.com"
     default_ai_model: str = "deepseek-ai/DeepSeek-V4-Flash"
     document_ai_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     code_ai_model: str = "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo"

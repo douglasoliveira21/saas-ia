@@ -9,6 +9,7 @@ Plataforma multiempresa com frontend Next.js, API FastAPI, PostgreSQL/pgvector, 
 - Convites de equipe, limites por plano e painel de consumo
 - Agentes personalizados, pastas, conversas, mensagens e arquivos
 - Chat via API compatível com OpenAI da DeepInfra e registro de tokens/custo
+- Pesquisa automática na internet com fontes, independente do modelo de IA
 - Upload validado com storage persistente e worker Celery preparado para extração/RAG
 - Stripe Checkout e webhook de assinatura, falha de pagamento e cancelamento
 - API documentada automaticamente em `/docs`
@@ -58,6 +59,8 @@ FRONTEND_URL=https://app.seudominio.com
 NEXT_PUBLIC_API_URL=https://api.seudominio.com/api/v1
 DEEPINFRA_API_KEY=sua_chave
 DEEPINFRA_BASE_URL=https://api.deepinfra.com/v1/openai
+TAVILY_API_KEY=tvly-sua_chave
+TAVILY_BASE_URL=https://api.tavily.com
 DEFAULT_AI_MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct
 STRIPE_SECRET_KEY=sk_live_...
 STRIPE_WEBHOOK_SECRET=whsec_...

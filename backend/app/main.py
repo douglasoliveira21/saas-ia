@@ -244,6 +244,20 @@ async def ai_answer(data:ChatIn,user,db):
     if not images and not documents:
         if re.search(code_terms,content,re.IGNORECASE): model=settings.code_ai_model
         elif re.search(reasoning_terms,content,re.IGNORECASE): model=settings.reasoning_ai_model
+    web_terms=r"\b(pesquise|pesquisar|procure na (?:internet|web)|busque na (?:internet|web)|notícia|noticias|hoje|agora|atual|atualmente|recente|últim[oa]s?|preço|cotação|clima|previsão do tempo|placar|resultado do jogo|campeonato|versão mais recente|documentação oficial|legislação|lei vigente|diário oficial|presidente atual|ceo atual|link oficial|fonte oficial)\b"
+    web_search=bool(settings.tavily_api_key and not attached and re.search(web_terms,content,re.IGNORECASE))
+    if web_search:
+        topic="news" if re.search(r"\b(notícia|noticias|hoje|agora|recente|placar|resultado do jogo)\b",content,re.IGNORECASE) else "finance" if re.search(r"\b(preço|cotação|ação|acoes|ações|criptomoeda|dólar|dolar)\b",content,re.IGNORECASE) else "general"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"topic":topic,"search_depth":"basic","max_results":5,"include_answer":False,"include_raw_content":False})
+            search.raise_for_status(); results=search.json().get("results",[])[:5]
+            if results:
+                sources="\n\n".join(f"FONTE {i+1}: {x.get('title','Sem título')}\nURL: {x.get('url','')}\nCONTEÚDO: {x.get('content','')[:1800]}" for i,x in enumerate(results))
+                api_messages[0]["content"]+=f"\n\nA data atual é {datetime.now(timezone.utc).date().isoformat()}. Foi realizada uma pesquisa na internet para esta pergunta. Responda com base nas fontes abaixo, compare divergências, não invente e inclua links Markdown para as fontes usadas junto às afirmações. Ao final, crie uma seção curta intitulada 'Fontes'.\n\n{sources}"
+            else: web_search=False
+        except (httpx.HTTPError,ValueError) as exc:
+            logger.warning("Web search failed: %s",exc); web_search=False
     if settings.deepinfra_api_key:
         payload={"model":model,"messages":api_messages,"temperature":agent.temperature if agent else .7}
         async with httpx.AsyncClient(timeout=120) as client:
@@ -251,7 +265,7 @@ async def ai_answer(data:ChatIn,user,db):
         answer=result["choices"][0]["message"]["content"]; usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
     db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
-    route="vision" if images else "document" if documents else "audio" if audio_files else "code" if model==settings.code_ai_model else "reasoning" if model==settings.reasoning_ai_model else "text"
+    route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "code" if model==settings.code_ai_model else "reasoning" if model==settings.reasoning_ai_model else "text"
     return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"image":None,"usage":{"input":inp,"output":out}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)

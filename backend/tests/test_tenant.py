@@ -35,3 +35,9 @@ def test_general_web_results_must_match_the_question():
     filtered = filter_web_results("qual a cotação atual do dólar", results)
     assert [item["url"] for item in filtered] == ["https://example.com/dolar"]
 
+
+def test_spreadsheet_spec_accepts_json_code_fence():
+    from app.main import spreadsheet_spec
+    result = spreadsheet_spec('```json\n{"filename":"teste.xlsx","sheets":[{"name":"Dados","headers":["Item"],"rows":[["A"]]}]}\n```')
+    assert result["filename"] == "teste.xlsx"
+

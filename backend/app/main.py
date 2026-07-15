@@ -9,7 +9,7 @@ from pypdf import PdfReader
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, MoveConversation, ChatIn
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -118,10 +118,14 @@ def clear_memories(user=Depends(current_user),db:Session=Depends(get_db)):
     for item in db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id)).all(): db.delete(item)
     db.commit()
 @app.patch(API+"/conversations/{item_id}")
-def move_conversation(item_id:str,data:MoveConversation,user=Depends(current_user),db:Session=Depends(get_db)):
+def update_conversation(item_id:str,data:UpdateConversation,user=Depends(current_user),db:Session=Depends(get_db)):
     item=tenant_get(db,Conversation,item_id,user)
     if data.folder_id: tenant_get(db,Folder,data.folder_id,user)
-    item.folder_id=data.folder_id; db.commit(); db.refresh(item); return dump(item)
+    values=data.model_dump(exclude_unset=True)
+    for key,value in values.items(): setattr(item,key,value[:200] if key=="title" and value else value)
+    db.commit(); db.refresh(item); return dump(item)
+@app.delete(API+"/conversations/{item_id}",status_code=204)
+def delete_conversation(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): db.delete(tenant_get(db,Conversation,item_id,user)); db.commit()
 @app.post(API+"/files",status_code=201)
 async def upload(file:UploadFile=Upload(...),user=Depends(current_user),db:Session=Depends(get_db)):
     allowed={"application/pdf","text/plain","text/markdown","image/png","image/jpeg"}

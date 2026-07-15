@@ -564,6 +564,20 @@ export default function Workspace() {
 function Spinner({ className = "" }: { className?: string }) {
   return <span className={`inline-block h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-950 ${className}`} />;
 }
+async function downloadAttachment(href: string) {
+  const token = await getAccessToken();
+  if (!token) throw new Error("Sua sessão expirou. Entre novamente.");
+  const path = href.replace(/^\/api\/v1/, "");
+  const response = await fetch(API + path, { headers: { Authorization: `Bearer ${token}` } });
+  if (!response.ok) throw new Error("Não foi possível baixar o arquivo.");
+  const disposition = response.headers.get("content-disposition") || "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const fallback = disposition.match(/filename="?([^";]+)"?/i)?.[1] || "planilha.xlsx";
+  const anchor = document.createElement("a");
+  anchor.href = URL.createObjectURL(await response.blob());
+  anchor.download = encoded ? decodeURIComponent(encoded) : fallback;
+  anchor.click(); URL.revokeObjectURL(anchor.href);
+}
 function MarkdownAnswer({ content }: { content: string }) {
   return (
     <div className="ai-markdown">
@@ -578,7 +592,7 @@ function MarkdownAnswer({ content }: { content: string }) {
           ul: ({ children }) => <ul className="my-3 list-disc space-y-1 pl-6">{children}</ul>,
           ol: ({ children }) => <ol className="my-3 list-decimal space-y-1 pl-6">{children}</ol>,
           blockquote: ({ children }) => <blockquote className="my-4 border-l-4 border-zinc-300 bg-zinc-50 py-2 pl-4 text-zinc-600">{children}</blockquote>,
-          a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline decoration-blue-300 underline-offset-2 hover:text-blue-800">{children}</a>,
+          a: ({ children, href }) => href?.startsWith("/api/v1/files/") ? <button type="button" onClick={() => downloadAttachment(href)} className="inline-flex items-center gap-2 rounded-xl bg-zinc-950 px-4 py-2 font-medium text-white"><Download size={16}/>{children}</button> : <a href={href} target="_blank" rel="noreferrer" className="font-medium text-blue-600 underline decoration-blue-300 underline-offset-2 hover:text-blue-800">{children}</a>,
           code: ({ children, className }) => className ? <code className={`${className} block overflow-x-auto rounded-xl bg-zinc-950 p-4 font-mono text-[13px] leading-6 text-zinc-100`}>{children}</code> : <code className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[13px] text-zinc-900">{children}</code>,
           pre: ({ children }) => <pre className="my-4 overflow-hidden rounded-xl">{children}</pre>,
           table: ({ children }) => <div className="my-5 overflow-x-auto rounded-xl border border-zinc-200"><table className="w-full border-collapse text-left text-sm">{children}</table></div>,

@@ -411,7 +411,8 @@ export default function Workspace() {
             {error}
           </div>
         )}
-        <div className="scroll mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-y-auto px-5 py-8">
+        <div className="scroll min-h-0 w-full flex-1 overflow-y-auto">
+          <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-6 px-5 py-8">
           {messages.map((m) => (
             <div
               key={m.id}
@@ -464,6 +465,7 @@ export default function Workspace() {
               </p>
             </div>
           )}
+          </div>
         </div>
         <form
           onSubmit={send}

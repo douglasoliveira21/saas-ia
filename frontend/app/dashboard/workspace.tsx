@@ -44,6 +44,7 @@ type ChatMessage = {
   role: string;
   content: string;
   image?: string;
+  status?: string;
 };
 type FolderType = { id: string; name: string };
 type Dash = {
@@ -227,10 +228,12 @@ export default function Workspace() {
         );
       socket.onmessage = (e) => {
         const p = JSON.parse(e.data);
+        if (p.type === "status")
+          setMessages((v) => v.map((m) => m.id === aid ? { ...m, status: p.content } : m));
         if (p.type === "delta")
           setMessages((v) =>
             v.map((m) =>
-              m.id === aid ? { ...m, content: m.content + p.content } : m,
+              m.id === aid ? { ...m, content: m.content + p.content, status: undefined } : m,
             ),
           );
         if (p.type === "done") {
@@ -450,7 +453,7 @@ export default function Workspace() {
                 {m.role === "assistant" ? <MarkdownAnswer content={m.content} /> : m.content}
                 {m.role === "assistant" && busy && !m.content && (
                   <span className="flex items-center gap-2 text-zinc-400">
-                    <Spinner /> Pensando...
+                    <Spinner /> {m.status || "Pensando..."}
                   </span>
                 )}
               </div>

@@ -1,5 +1,6 @@
 import asyncio, base64, logging, pathlib, re, secrets
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -244,17 +245,23 @@ async def ai_answer(data:ChatIn,user,db):
     if not images and not documents:
         if re.search(code_terms,content,re.IGNORECASE): model=settings.code_ai_model
         elif re.search(reasoning_terms,content,re.IGNORECASE): model=settings.reasoning_ai_model
-    web_terms=r"\b(pesquise|pesquisar|procure na (?:internet|web)|busque na (?:internet|web)|notícia|noticias|hoje|agora|atual|atualmente|recente|últim[oa]s?|preço|cotação|clima|previsão do tempo|placar|resultado do jogo|campeonato|versão mais recente|documentação oficial|legislação|lei vigente|diário oficial|presidente atual|ceo atual|link oficial|fonte oficial)\b"
+    web_terms=r"\b(pesquise|pesquisar|procure na (?:internet|web)|busque na (?:internet|web)|notícia|noticias|hoje|agora|atual|atualmente|recente|últim[oa]s?|preço|cotação|clima|previsão do tempo|placar|resultado|jogo|partida|campeonato|copa do mundo|quanto (?:tá|ta|está|esta)|versão mais recente|documentação oficial|legislação|lei vigente|diário oficial|presidente atual|ceo atual|link oficial|fonte oficial)\b"
     web_search=bool(settings.tavily_api_key and not attached and re.search(web_terms,content,re.IGNORECASE))
     if web_search:
-        topic="news" if re.search(r"\b(notícia|noticias|hoje|agora|recente|placar|resultado do jogo)\b",content,re.IGNORECASE) else "finance" if re.search(r"\b(preço|cotação|ação|acoes|ações|criptomoeda|dólar|dolar)\b",content,re.IGNORECASE) else "general"
+        now_br=datetime.now(ZoneInfo("America/Sao_Paulo")); sports=bool(re.search(r"\b(placar|resultado|jogo|partida|campeonato|copa|futebol|quanto (?:tá|ta|está|esta))\b",content,re.IGNORECASE))
+        topic="general" if sports else "news" if re.search(r"\b(notícia|noticias|hoje|agora|recente)\b",content,re.IGNORECASE) else "finance" if re.search(r"\b(preço|cotação|ação|acoes|ações|criptomoeda|dólar|dolar)\b",content,re.IGNORECASE) else "general"
+        query=f"{data.message}. Data e hora atual no Brasil: {now_br.strftime('%d/%m/%Y %H:%M')}. Procure placar ao vivo, status da partida, minuto de jogo e fonte oficial ou esportiva atualizada." if sports else f"{data.message}. Data atual: {now_br.strftime('%d/%m/%Y')}."
         try:
+            search_payload={"query":query,"topic":topic,"search_depth":"advanced" if sports else "basic","max_results":8 if sports else 5,"include_answer":"basic" if sports else False,"include_raw_content":False}
+            if sports: search_payload["time_range"]="day"
             async with httpx.AsyncClient(timeout=30) as client:
-                search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"topic":topic,"search_depth":"basic","max_results":5,"include_answer":False,"include_raw_content":False})
-            search.raise_for_status(); results=search.json().get("results",[])[:5]
+                search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json=search_payload)
+            search.raise_for_status(); search_data=search.json(); results=search_data.get("results",[])[:8 if sports else 5]
             if results:
                 sources="\n\n".join(f"FONTE {i+1}: {x.get('title','Sem título')}\nURL: {x.get('url','')}\nCONTEÚDO: {x.get('content','')[:1800]}" for i,x in enumerate(results))
-                api_messages[0]["content"]+=f"\n\nA data atual é {datetime.now(timezone.utc).date().isoformat()}. Foi realizada uma pesquisa na internet para esta pergunta. Responda com base nas fontes abaixo, compare divergências, não invente e inclua links Markdown para as fontes usadas junto às afirmações. Ao final, crie uma seção curta intitulada 'Fontes'.\n\n{sources}"
+                search_answer=search_data.get("answer","")
+                live_instruction="Esta é uma consulta de esporte ao vivo. Comece diretamente com o placar/status mais recente encontrado, informe as equipes, o minuto ou se a partida ainda não começou/terminou e o horário da atualização. Não diga apenas que não possui dados em tempo real. Se as fontes divergirem, mostre a divergência claramente." if sports else ""
+                api_messages[0]["content"]+=f"\n\nA data e hora atual no Brasil é {now_br.isoformat()}. Foi realizada uma pesquisa na internet para esta pergunta. Responda com base nas fontes abaixo, compare divergências, não invente e inclua links Markdown para as fontes usadas junto às afirmações. Ao final, crie uma seção curta intitulada 'Fontes'. {live_instruction}\n\nRESUMO DA BUSCA: {search_answer}\n\n{sources}"
             else: web_search=False
         except (httpx.HTTPError,ValueError) as exc:
             logger.warning("Web search failed: %s",exc); web_search=False
@@ -279,7 +286,9 @@ async def chat_stream(ws:WebSocket):
         user=db.get(User,user_id)
         if not user or user.status!="active": await ws.close(code=4401); return
         while True:
-            payload=await ws.receive_json(); result=await ai_answer(ChatIn.model_validate(payload),user,db)
+            payload=await ws.receive_json()
+            if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})
+            result=await ai_answer(ChatIn.model_validate(payload),user,db)
             words=result["message"].split(" ")
             for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
             await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"image":result.get("image"),"usage":result["usage"]})

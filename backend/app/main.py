@@ -23,11 +23,17 @@ def ensure_superadmin():
     db=SessionLocal()
     try:
         user=db.scalar(select(User).where(User.email==settings.superadmin_email).limit(1))
+        company=None
+        if not user or not user.company_id:
+            company=db.scalar(select(Company).where(Company.email==settings.superadmin_email).limit(1))
+            if not company:
+                company=Company(name=f"{settings.app_name} — Administração",email=settings.superadmin_email,plan="enterprise")
+                db.add(company); db.flush()
         if not user:
-            user=User(company_id=None,name="Super Admin",email=settings.superadmin_email,password_hash=hash_password(settings.superadmin_password),role="superadmin")
+            user=User(company_id=company.id,name="Super Admin",email=settings.superadmin_email,password_hash=hash_password(settings.superadmin_password),role="superadmin")
             db.add(user)
         else:
-            user.role="superadmin"; user.status="active"; user.password_hash=hash_password(settings.superadmin_password)
+            user.company_id=user.company_id or company.id; user.role="superadmin"; user.status="active"; user.password_hash=hash_password(settings.superadmin_password)
         db.commit()
     finally: db.close()
 def refresh_pair(user,db):
@@ -68,9 +74,9 @@ def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
     counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
     return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}
 @app.get(API+"/team")
-def team(user=Depends(require_roles("owner","admin")),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(User).where(User.company_id==user.company_id)).all()]
+def team(user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(User).where(User.company_id==user.company_id)).all()]
 @app.post(API+"/team/invite")
-def invite(data:InviteIn,user=Depends(require_roles("owner","admin")),db:Session=Depends(get_db)):
+def invite(data:InviteIn,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
     if data.role not in ("admin","member"): raise HTTPException(400,"Perfil inválido")
     token=random_token(); item=Invitation(company_id=user.company_id,email=data.email,role=data.role,token=token,expires_at=datetime.now(timezone.utc)+timedelta(days=7)); db.add(item); db.commit()
     return {"message":"Convite criado","invite_url":f"{settings.frontend_url}/convite?token={token}","email_delivery":"configure SMTP para envio automático" if not settings.smtp_host else "queued"}
@@ -83,12 +89,12 @@ def accept(data:AcceptInvite,db:Session=Depends(get_db)):
 @app.get(API+"/agents")
 def agents(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Agent).where(Agent.company_id==user.company_id).order_by(Agent.created_at.desc())).all()]
 @app.post(API+"/agents",status_code=201)
-def create_agent(data:AgentIn,user=Depends(require_roles("owner","admin")),db:Session=Depends(get_db)):
+def create_agent(data:AgentIn,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
     company=db.get(Company,user.company_id); count=db.scalar(select(func.count()).select_from(Agent).where(Agent.company_id==user.company_id))
     if count>=PLANS.get(company.plan,PLANS["starter"])["agents"]: raise HTTPException(402,"Limite de agentes do plano atingido")
     item=Agent(company_id=user.company_id,created_by=user.id,**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return dump(item)
 @app.delete(API+"/agents/{item_id}",status_code=204)
-def delete_agent(item_id:str,user=Depends(require_roles("owner","admin")),db:Session=Depends(get_db)): db.delete(tenant_get(db,Agent,item_id,user)); db.commit()
+def delete_agent(item_id:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)): db.delete(tenant_get(db,Agent,item_id,user)); db.commit()
 @app.get(API+"/folders")
 def folders(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Folder).where(Folder.company_id==user.company_id)).all()]
 @app.post(API+"/folders",status_code=201)
@@ -105,10 +111,20 @@ async def upload(file:UploadFile=Upload(...),user=Depends(current_user),db:Sessi
     if len(content)>20*1024*1024: raise HTTPException(413,"Arquivo excede 20 MB")
     root=pathlib.Path("storage")/user.company_id; root.mkdir(parents=True,exist_ok=True); safe=f"{secrets.token_hex(12)}-{pathlib.Path(file.filename or 'file').name}"; path=root/safe; path.write_bytes(content)
     item=File(company_id=user.company_id,user_id=user.id,name=file.filename or safe,path=str(path),mime_type=file.content_type or "application/octet-stream",size=len(content)); db.add(item); db.commit(); db.refresh(item); return dump(item)
+@app.get(API+"/files")
+def list_files(user=Depends(current_user),db:Session=Depends(get_db)):
+    return [dump(x) for x in db.scalars(select(File).where(File.company_id==user.company_id).order_by(File.created_at.desc())).all()]
+@app.delete(API+"/files/{item_id}",status_code=204)
+def delete_file(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+    item=tenant_get(db,File,item_id,user)
+    try: pathlib.Path(item.path).unlink(missing_ok=True)
+    except OSError: pass
+    db.delete(item); db.commit()
 async def ai_answer(data:ChatIn,user,db):
     conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,title=data.message[:70])
     if not data.conversation_id: db.add(conv); db.flush()
-    agent=tenant_get(db,Agent,data.agent_id,user) if data.agent_id else None; model=agent.ai_model if agent else settings.default_ai_model; prompt=agent.system_prompt if agent else "Você é um assistente empresarial claro e útil."
+    agent_id=data.agent_id or conv.agent_id
+    agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=agent.ai_model if agent else settings.default_ai_model; prompt=agent.system_prompt if agent else "Você é um assistente empresarial claro e útil."
     db.add(Message(conversation_id=conv.id,role="user",content=data.message)); history=db.scalars(select(Message).where(Message.conversation_id==conv.id).order_by(Message.created_at.desc()).limit(20)).all()
     if settings.deepinfra_api_key:
         payload={"model":model,"messages":[{"role":"system","content":prompt}]+[{"role":m.role,"content":m.content} for m in reversed(history)],"temperature":agent.temperature if agent else .7}

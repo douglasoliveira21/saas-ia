@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     deepinfra_api_key: str = ""
     deepinfra_base_url: str = "https://api.deepinfra.com/v1/openai"
     default_ai_model: str = "meta-llama/Meta-Llama-3.1-70B-Instruct"
+    vision_ai_model: str = "Qwen/Qwen2.5-VL-32B-Instruct"
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_starter_price_id: str = ""
@@ -26,4 +27,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings(): return Settings()
 settings = get_settings()
-

@@ -1,10 +1,11 @@
-import asyncio, pathlib, secrets
+import asyncio, base64, pathlib, re, secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 import httpx, stripe
+from pypdf import PdfReader
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog
@@ -125,15 +126,52 @@ async def ai_answer(data:ChatIn,user,db):
     if not data.conversation_id: db.add(conv); db.flush()
     agent_id=data.agent_id or conv.agent_id
     agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=agent.ai_model if agent else settings.default_ai_model; prompt=agent.system_prompt if agent else "Você é um assistente empresarial claro e útil."
-    db.add(Message(conversation_id=conv.id,role="user",content=data.message)); history=db.scalars(select(Message).where(Message.conversation_id==conv.id).order_by(Message.created_at.desc()).limit(20)).all()
+    attached=[]
+    if data.file_ids:
+        attached=db.scalars(select(File).where(File.id.in_(data.file_ids),File.company_id==user.company_id)).all()
+        if len(attached)!=len(set(data.file_ids)): raise HTTPException(404,"Um ou mais anexos não foram encontrados")
+    db.add(Message(conversation_id=conv.id,role="user",content=data.message)); db.flush()
+    image_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|desenhe)\b.{0,45}\b(imagem|foto|fotografia|ilustração|arte|logo|banner)\b",data.message.lower()))
+    if image_intent and not attached:
+        if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
+        else:
+            async with httpx.AsyncClient(timeout=180) as client:
+                res=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}); res.raise_for_status(); generated=res.json()["data"][0]
+            image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
+        db.add(Message(conversation_id=conv.id,role="assistant",content=answer)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model="FLUX Schnell",input_tokens=0,output_tokens=0,cost=0)); db.commit()
+        return {"conversation_id":conv.id,"message":answer,"model":"FLUX Schnell","route":"image_generation","image":image_data,"usage":{"input":0,"output":0}}
+    history=db.scalars(select(Message).where(Message.conversation_id==conv.id).order_by(Message.created_at.desc()).limit(20)).all()
+    api_messages=[{"role":"system","content":prompt}]+[{"role":m.role,"content":m.content} for m in reversed(history)]
+    images=[x for x in attached if x.mime_type in {"image/png","image/jpeg","image/webp"}]
+    documents=[x for x in attached if x.mime_type in {"application/pdf","text/plain","text/markdown"}]
+    if documents:
+        sections=[]
+        for item in documents:
+            text=item.extracted_text or ""
+            if not text:
+                try:
+                    text="\n".join((p.extract_text() or "") for p in PdfReader(item.path).pages[:40]) if item.mime_type=="application/pdf" else pathlib.Path(item.path).read_text(encoding="utf-8",errors="ignore")
+                    item.extracted_text=text[:200000]
+                except Exception: text="[Não foi possível extrair o conteúdo deste arquivo]"
+            sections.append(f"ARQUIVO: {item.name}\n{text[:60000]}")
+        api_messages[0]["content"]+= "\n\nUse os documentos anexados como contexto e deixe claro quando uma informação não estiver neles:\n"+"\n\n".join(sections)
+    if images:
+        model=settings.vision_ai_model
+        multimodal=[]
+        for item in images:
+            encoded=base64.b64encode(pathlib.Path(item.path).read_bytes()).decode()
+            multimodal.append({"type":"image_url","image_url":{"url":f"data:{item.mime_type};base64,{encoded}"}})
+        multimodal.append({"type":"text","text":data.message})
+        api_messages[-1]["content"]=multimodal
     if settings.deepinfra_api_key:
-        payload={"model":model,"messages":[{"role":"system","content":prompt}]+[{"role":m.role,"content":m.content} for m in reversed(history)],"temperature":agent.temperature if agent else .7}
+        payload={"model":model,"messages":api_messages,"temperature":agent.temperature if agent else .7}
         async with httpx.AsyncClient(timeout=120) as client:
             res=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json=payload,headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}); res.raise_for_status(); result=res.json()
         answer=result["choices"][0]["message"]["content"]; usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
     db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
-    return {"conversation_id":conv.id,"message":answer,"model":model,"usage":{"input":inp,"output":out}}
+    route="vision" if images else "document" if documents else "text"
+    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"image":None,"usage":{"input":inp,"output":out}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)
 @app.websocket("/ws/chat")

@@ -1,3 +1,2 @@
 import type { Config } from "tailwindcss";
-export default {content:["./app/**/*.{js,ts,jsx,tsx}"],theme:{extend:{colors:{ink:"#08090b",panel:"#111317",line:"#242831",lime:"#b6f36b"}}},plugins:[]} satisfies Config;
-
+export default {content:["./app/**/*.{js,ts,jsx,tsx}"],theme:{extend:{colors:{ink:"#ffffff",panel:"#f7f7f8",line:"#e5e7eb",lime:"#111827"}}},plugins:[]} satisfies Config;

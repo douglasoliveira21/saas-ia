@@ -9,7 +9,7 @@ from pypdf import PdfReader
 from app.config import settings
 from app.database import get_db, SessionLocal
 from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, ChatIn
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, MoveConversation, ChatIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -100,10 +100,17 @@ def delete_agent(item_id:str,user=Depends(require_roles("owner","admin","superad
 def folders(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Folder).where(Folder.company_id==user.company_id)).all()]
 @app.post(API+"/folders",status_code=201)
 def create_folder(data:FolderIn,user=Depends(current_user),db:Session=Depends(get_db)): item=Folder(company_id=user.company_id,created_by=user.id,**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return dump(item)
+@app.delete(API+"/folders/{item_id}",status_code=204)
+def delete_folder(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): db.delete(tenant_get(db,Folder,item_id,user)); db.commit()
 @app.get(API+"/conversations")
 def conversations(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Conversation).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id).order_by(Conversation.created_at.desc())).all()]
 @app.get(API+"/conversations/{item_id}/messages")
 def messages(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): tenant_get(db,Conversation,item_id,user); return [dump(x) for x in db.scalars(select(Message).where(Message.conversation_id==item_id).order_by(Message.created_at)).all()]
+@app.patch(API+"/conversations/{item_id}")
+def move_conversation(item_id:str,data:MoveConversation,user=Depends(current_user),db:Session=Depends(get_db)):
+    item=tenant_get(db,Conversation,item_id,user)
+    if data.folder_id: tenant_get(db,Folder,data.folder_id,user)
+    item.folder_id=data.folder_id; db.commit(); db.refresh(item); return dump(item)
 @app.post(API+"/files",status_code=201)
 async def upload(file:UploadFile=Upload(...),user=Depends(current_user),db:Session=Depends(get_db)):
     allowed={"application/pdf","text/plain","text/markdown","image/png","image/jpeg"}
@@ -122,7 +129,8 @@ def delete_file(item_id:str,user=Depends(current_user),db:Session=Depends(get_db
     except OSError: pass
     db.delete(item); db.commit()
 async def ai_answer(data:ChatIn,user,db):
-    conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,title=data.message[:70])
+    if data.folder_id: tenant_get(db,Folder,data.folder_id,user)
+    conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,folder_id=data.folder_id,title=data.message[:70])
     if not data.conversation_id: db.add(conv); db.flush()
     agent_id=data.agent_id or conv.agent_id
     agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=agent.ai_model if agent else settings.default_ai_model; prompt=agent.system_prompt if agent else "Você é um assistente empresarial claro e útil."
@@ -187,7 +195,7 @@ async def chat_stream(ws:WebSocket):
             payload=await ws.receive_json(); result=await ai_answer(ChatIn.model_validate(payload),user,db)
             words=result["message"].split(" ")
             for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
-            await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"usage":result["usage"]})
+            await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"image":result.get("image"),"usage":result["usage"]})
     except WebSocketDisconnect: pass
     finally: db.close()
 @app.post(API+"/billing/checkout")

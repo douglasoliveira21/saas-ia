@@ -144,7 +144,7 @@ export default function FreeChat(){
         </div>
         <div className="bg-white px-4 pb-5">
           <form onSubmit={send} className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-white p-3 shadow-xl">
-            <textarea value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();e.currentTarget.form?.requestSubmit()}}} placeholder="Envie uma mensagem..." className="min-h-11 flex-1 resize-none bg-transparent p-2 outline-none"/>
+            <textarea value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();if(!busy&&text.trim())e.currentTarget.form?.requestSubmit()}}} placeholder="Envie uma mensagem..." className="min-h-11 flex-1 resize-none bg-transparent p-2 outline-none"/>
             {busy?<button type="button" onClick={stop} title="Interromper resposta" className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white"><Square size={15} fill="currentColor"/></button>:<button disabled={!text.trim()||blocked} className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300"><ArrowUp size={18}/></button>}
           </form>
           {error&&<div className="mx-auto mt-3 max-w-3xl rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}{blocked&&<span> — <Link href="/cadastro" className="font-semibold underline">Criar conta</Link></span>}</div>}

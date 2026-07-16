@@ -126,23 +126,6 @@ export default function Workspace() {
   useEffect(() => {
     load();
   }, [load]);
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const target = e.target as HTMLTextAreaElement;
-      if (
-        e.key === "Enter" &&
-        !e.shiftKey &&
-        !e.isComposing &&
-        target.tagName === "TEXTAREA" &&
-        target.placeholder === "Envie uma mensagem..."
-      ) {
-        e.preventDefault();
-        target.form?.requestSubmit();
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, []);
   async function open(c: Conversation) {
     setLoading("Abrindo conversa...");
     try {
@@ -337,7 +320,19 @@ export default function Workspace() {
           <Paperclip size={19} />
           <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         </label>
-        <textarea rows={1} value={text} onChange={(e) => setText(e.target.value)} placeholder="Envie uma mensagem..." className="min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none" />
+        <textarea
+          rows={1}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              if (!busy && text.trim()) e.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder="Envie uma mensagem..."
+          className="min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none"
+        />
         {busy ? (
           <button type="button" onClick={stopGeneration} title="Interromper resposta" aria-label="Interromper resposta" className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white">
             <Square size={15} fill="currentColor" />

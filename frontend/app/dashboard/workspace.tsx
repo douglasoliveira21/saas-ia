@@ -213,6 +213,16 @@ export default function Workspace() {
     } catch (e) { setError((e as Error).message); }
     finally { setLoading(""); }
   }
+  async function removeFolder(id:string) {
+    if (!confirm("Excluir esta pasta? As conversas voltarão para Recentes.")) return;
+    setLoading("Excluindo pasta...");
+    try {
+      await call(`/folders/${id}`, { method:"DELETE" });
+      if (folderId===id) setFolderId("");
+      await load();
+    } catch (e) { setError((e as Error).message); }
+    finally { setLoading(""); }
+  }
   async function send(e: React.FormEvent) {
     e.preventDefault();
     if (!text.trim() || busy) return;
@@ -377,6 +387,7 @@ export default function Workspace() {
               onDrop={(id) => patch(id, { folder_id: f.id })}
               onFavorite={(c) => patch(c.id, { favorite: !c.favorite })}
               onDelete={remove}
+              onDeleteFolder={() => removeFolder(f.id)}
             />
           ))}
           <DropSection
@@ -451,23 +462,6 @@ export default function Workspace() {
               <option value="">SolvitSoft Automático</option>
               {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
             </select>
-          {selected && (
-            <select
-              value={folderId}
-              onChange={(e) => {
-                setFolderId(e.target.value);
-                patch(selected, { folder_id: e.target.value || null });
-              }}
-              className="rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs"
-            >
-              <option value="">Sem pasta</option>
-              {folders.map((f) => (
-                <option key={f.id} value={f.id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-          )}
           </div>
         </header>
         {error && (
@@ -653,6 +647,7 @@ function DropSection({
   onDrop,
   onFavorite,
   onDelete,
+  onDeleteFolder,
 }: {
   title: string;
   icon: React.ReactNode;
@@ -662,6 +657,7 @@ function DropSection({
   onDrop: (id: string) => void;
   onFavorite: (c: Conversation) => void;
   onDelete: (id: string) => void;
+  onDeleteFolder?: () => void;
 }) {
   const [over, setOver] = useState(false);
   return (
@@ -682,6 +678,7 @@ function DropSection({
         {icon}
         {title}
         <span className="ml-auto">{items.length}</span>
+        {onDeleteFolder && <button type="button" onClick={onDeleteFolder} className="rounded p-1 text-zinc-400 hover:bg-red-50 hover:text-red-600" title="Excluir pasta"><Trash2 size={13}/></button>}
       </div>
       {items.map((c) => (
         <div

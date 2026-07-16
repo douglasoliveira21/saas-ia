@@ -373,7 +373,10 @@ def folders(user=Depends(current_user),db:Session=Depends(get_db)): return [dump
 @app.post(API+"/folders",status_code=201)
 def create_folder(data:FolderIn,user=Depends(current_user),db:Session=Depends(get_db)): item=Folder(company_id=user.company_id,created_by=user.id,**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return dump(item)
 @app.delete(API+"/folders/{item_id}",status_code=204)
-def delete_folder(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)): db.delete(tenant_get(db,Folder,item_id,user)); db.commit()
+def delete_folder(item_id:str,user=Depends(current_user),db:Session=Depends(get_db)):
+    item=tenant_get(db,Folder,item_id,user)
+    if item.created_by!=user.id and user.role not in {"owner","admin","superadmin"}: raise HTTPException(403,"Somente o criador ou um administrador pode excluir esta pasta")
+    db.delete(item); db.commit()
 @app.get(API+"/conversations")
 def conversations(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Conversation).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id).order_by(Conversation.created_at.desc())).all()]
 @app.get(API+"/conversations/{item_id}/messages")

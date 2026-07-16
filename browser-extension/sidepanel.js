@@ -40,7 +40,8 @@ async function activeContext(){
   }
 }
 async function screenshotFile(){
-  const result=await chrome.runtime.sendMessage({type:"capture"});if(result.error)throw new Error(result.error);
+  const tab=await activeTab();
+  const result=await chrome.runtime.sendMessage({type:"capture",windowId:tab.windowId});if(result.error)throw new Error(result.error);
   const blob=await (await fetch(result.dataUrl)).blob();const body=new FormData();body.append("file",blob,"pagina.png");const tokens=await stored();
   let response=await fetch(API+"/files",{method:"POST",headers:{Authorization:`Bearer ${tokens.access_token}`},body});if(response.status===401){const token=await refresh();response=await fetch(API+"/files",{method:"POST",headers:{Authorization:`Bearer ${token}`},body})}
   if(!response.ok)throw new Error("Não foi possível enviar a captura.");return (await response.json()).id;

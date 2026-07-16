@@ -4,8 +4,8 @@ from html import escape as html_escape
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from sqlalchemy import select, func, or_
+from fastapi.responses import FileResponse, StreamingResponse
+from sqlalchemy import select, func, or_, delete
 from sqlalchemy.orm import Session
 import httpx, stripe
 from pypdf import PdfReader
@@ -23,10 +23,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from bs4 import BeautifulSoup
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, UserSettingsIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -47,6 +47,15 @@ def ensure_web_sources(answer:str,results:list[dict])->str:
     if not sources: return answer
     links="\n".join(f"- [{title}]({url})" for title,url in sources)
     return f"{answer.rstrip()}\n\n## Fontes consultadas\n\n{links}"
+
+def anonymize_training_text(value:str)->str:
+    value=re.sub(r"(?i)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b","[EMAIL]",value)
+    value=re.sub(r"\b(?:\+?55\s*)?(?:\(?\d{2}\)?\s*)?9?\d{4}[-.\s]?\d{4}\b","[TELEFONE]",value)
+    value=re.sub(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b|\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b","[DOCUMENTO]",value)
+    value=re.sub(r"(?i)\b(?:sk|tvly|pk|rk|key|token)[-_][a-z0-9_-]{12,}\b","[CHAVE_REMOVIDA]",value)
+    value=re.sub(r"(?i)(password|senha|secret|api[_ -]?key)\s*[:=]\s*\S+",r"\1=[REMOVIDO]",value)
+    value=re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b","[IP]",value)
+    return value[:30000]
 
 def filter_web_results(query:str,results:list[dict],minimum_matches:int=1)->list[dict]:
     """Drop web results that do not mention the relevant entities in the question."""
@@ -195,8 +204,10 @@ def resume_pending_rag_indexes():
     try: pending=db.scalars(select(File.id).where(File.index_status=="pending",File.mime_type.in_(INDEXABLE_MIMES)).limit(1000)).all()
     finally: db.close()
     for file_id in pending: queue_index(file_id)
-def refresh_pair(user,db):
-    raw=random_token(); db.add(RefreshToken(user_id=user.id,token_hash=token_hash(raw),expires_at=datetime.now(timezone.utc)+timedelta(days=30))); db.commit(); return {"access_token":create_token(user),"refresh_token":raw,"token_type":"bearer"}
+def refresh_pair(user,db,request:Request|None=None):
+    raw=random_token(); agent=request.headers.get("user-agent","")[:500] if request else ""; ip=request.client.host if request and request.client else None
+    device=("Celular" if re.search(r"mobile|android|iphone",agent,re.I) else "Computador")+" — "+(re.search(r"(Chrome|Firefox|Safari|Edge|Edg)/[\d.]+",agent).group(0) if re.search(r"(Chrome|Firefox|Safari|Edge|Edg)/[\d.]+",agent) else "Navegador")
+    db.add(RefreshToken(user_id=user.id,token_hash=token_hash(raw),expires_at=datetime.now(timezone.utc)+timedelta(days=30),device_name=device,user_agent=agent,ip_address=ip,last_used_at=datetime.now(timezone.utc),created_at=datetime.now(timezone.utc))); db.commit(); return {"access_token":create_token(user),"refresh_token":raw,"token_type":"bearer"}
 def dump(obj): return {c.name:getattr(obj,c.name) for c in obj.__table__.columns}
 def tenant_get(db,model,obj_id,user):
     obj=db.scalar(select(model).where(model.id==obj_id,model.company_id==user.company_id))
@@ -231,24 +242,61 @@ def queue_index(file_id,strict=False):
 @app.get("/health")
 def health(): return {"status":"ok","service":settings.app_name}
 @app.post(API+"/auth/register",status_code=201)
-def register(data:Register,db:Session=Depends(get_db)):
+def register(data:Register,request:Request,db:Session=Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"E-mail já cadastrado")
     company=Company(name=data.company_name,document=(data.document or "").strip() or None,email=data.email); db.add(company); db.flush()
-    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.commit(); return refresh_pair(user,db)
+    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.commit(); return refresh_pair(user,db,request)
 @app.post(API+"/auth/login")
-def login(data:Login,db:Session=Depends(get_db)):
+def login(data:Login,request:Request,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"Credenciais inválidas")
-    return refresh_pair(user,db)
+    return refresh_pair(user,db,request)
 @app.post(API+"/auth/refresh")
-def refresh(data:Refresh,db:Session=Depends(get_db)):
+def refresh(data:Refresh,request:Request,db:Session=Depends(get_db)):
     item=db.scalar(select(RefreshToken).where(RefreshToken.token_hash==token_hash(data.refresh_token),RefreshToken.revoked==False))
     if not item or item.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc): raise HTTPException(401,"Refresh token inválido")
-    item.revoked=True; user=db.get(User,item.user_id); db.commit(); return refresh_pair(user,db)
+    item.revoked=True; item.last_used_at=datetime.now(timezone.utc); user=db.get(User,item.user_id)
+    if not user or user.status!="active": raise HTTPException(401,"Usuário inativo")
+    db.commit(); return refresh_pair(user,db,request)
 @app.get(API+"/me")
 def me(user=Depends(current_user),db:Session=Depends(get_db)):
     company=db.get(Company,user.company_id) if user.company_id else None
-    return {**dump(user),"company":dump(company) if company else None}
+    payload=dump(user); payload["avatar"]="/me/avatar" if user.avatar else None
+    return {**payload,"company":dump(company) if company else None}
+@app.patch(API+"/me")
+def update_me(data:UserSettingsIn,user=Depends(current_user),db:Session=Depends(get_db)):
+    values=data.model_dump(exclude_unset=True)
+    if values.get("location_metadata_enabled") is False: values.update(location_lat=None,location_lng=None,location_timezone=None)
+    if values.get("training_opt_in") is False: db.execute(delete(TrainingSample).where(TrainingSample.user_id==user.id))
+    for key,value in values.items(): setattr(user,key,value)
+    db.commit(); db.refresh(user); return dump(user)
+@app.post(API+"/me/avatar")
+async def update_avatar(file:UploadFile=Upload(...),user=Depends(current_user),db:Session=Depends(get_db)):
+    if file.content_type not in {"image/png","image/jpeg","image/webp"}: raise HTTPException(400,"Envie uma imagem PNG, JPG ou WebP")
+    content=await file.read()
+    if len(content)>5*1024*1024: raise HTTPException(413,"Avatar deve ter no máximo 5 MB")
+    suffix={"image/png":".png","image/jpeg":".jpg","image/webp":".webp"}[file.content_type]; path=pathlib.Path("storage")/user.company_id/"avatars"/f"{user.id}{suffix}"; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(content); user.avatar=str(path); db.commit()
+    return {"avatar":f"/me/avatar?v={int(datetime.now().timestamp())}"}
+@app.get(API+"/me/avatar")
+def get_avatar(user=Depends(current_user)):
+    if not user.avatar or not pathlib.Path(user.avatar).is_file(): raise HTTPException(404,"Avatar não encontrado")
+    return FileResponse(user.avatar)
+@app.get(API+"/account/devices")
+def account_devices(user=Depends(current_user),db:Session=Depends(get_db)):
+    now=datetime.now(timezone.utc); items=db.scalars(select(RefreshToken).where(RefreshToken.user_id==user.id,RefreshToken.revoked==False,RefreshToken.expires_at>now).order_by(RefreshToken.last_used_at.desc())).all()
+    return [{**dump(x),"token_hash":None} for x in items]
+@app.post(API+"/account/logout-all")
+def logout_all(user=Depends(current_user),db:Session=Depends(get_db)):
+    db.execute(delete(RefreshToken).where(RefreshToken.user_id==user.id)); user.token_version+=1; db.commit(); return {"message":"Todos os dispositivos foram desconectados"}
+@app.delete(API+"/account")
+def delete_account(user=Depends(current_user),db:Session=Depends(get_db)):
+    for item in db.scalars(select(File).where(File.user_id==user.id)).all():
+        try: pathlib.Path(item.path).unlink(missing_ok=True)
+        except OSError: pass
+        db.delete(item)
+    db.execute(delete(UserMemory).where(UserMemory.user_id==user.id)); db.execute(delete(TrainingSample).where(TrainingSample.user_id==user.id)); db.execute(delete(RefreshToken).where(RefreshToken.user_id==user.id)); db.execute(delete(Conversation).where(Conversation.user_id==user.id))
+    user.name="Conta excluída"; user.preferred_name=None; user.custom_instructions=None; user.avatar=None; user.email=f"deleted-{user.id}@invalid.local"; user.password_hash=hash_password(secrets.token_urlsafe(48)); user.status="deleted"; user.token_version+=1; db.commit()
+    return {"message":"Conta e dados pessoais excluídos"}
 @app.get(API+"/dashboard")
 def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
     if user.role=="superadmin":
@@ -258,6 +306,16 @@ def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
     cid=user.company_id; company=db.get(Company,cid); usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0)).where(UsageLog.company_id==cid)).one()
     counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
     return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}
+@app.get(API+"/admin/training/stats")
+def training_stats(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    return {"samples":db.scalar(select(func.count()).select_from(TrainingSample)) or 0,"contributors":db.scalar(select(func.count(func.distinct(TrainingSample.user_id)))) or 0}
+@app.get(API+"/admin/training/export")
+def export_training(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    rows=db.scalars(select(TrainingSample).order_by(TrainingSample.created_at).limit(100000)).all()
+    def stream():
+        for row in rows:
+            yield json.dumps({"messages":[{"role":"user","content":row.prompt},{"role":"assistant","content":row.response}],"metadata":{"category":row.category,"model":row.model}},ensure_ascii=False)+"\n"
+    return StreamingResponse(stream(),media_type="application/x-ndjson",headers={"Content-Disposition":f'attachment; filename="solvitsoft-training-{datetime.now().date()}.jsonl"'})
 @app.get(API+"/team")
 def team(user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(User).where(User.company_id==user.company_id)).all()]
 @app.post(API+"/team/invite")
@@ -361,16 +419,20 @@ async def ai_answer(data:ChatIn,user,db):
     if not data.conversation_id: db.add(conv); db.flush()
     agent_id=data.agent_id or conv.agent_id
     agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=settings.default_ai_model; prompt=OFFICIAL_PROMPT+(f"\n\nEspecialização ativa: {agent.system_prompt}" if agent else "")
-    personal=db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc()).limit(30)).all()
+    if user.preferred_name: prompt+=f"\n\nChame o usuário de {user.preferred_name}."
+    if user.occupation: prompt+=f"\n\nAdapte exemplos, linguagem e recomendações à área profissional: {user.occupation}."
+    if user.custom_instructions: prompt+=f"\n\nInstruções permanentes fornecidas pelo usuário:\n{user.custom_instructions}"
+    if user.location_metadata_enabled and user.location_lat is not None and user.location_lng is not None: prompt+=f"\n\nLocalização aproximada autorizada pelo usuário: latitude {user.location_lat:.3f}, longitude {user.location_lng:.3f}, fuso {user.location_timezone or 'não informado'}. Use apenas quando for relevante e não exponha coordenadas na resposta."
+    personal=db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc()).limit(30)).all() if user.memory_enabled else []
     if personal: prompt+="\n\nMemórias confirmadas deste usuário. Use-as apenas quando forem relevantes e nunca invente novas:\n- "+"\n- ".join(x.value for x in personal)
-    previous=db.execute(select(Message.role,Message.content).join(Conversation,Conversation.id==Message.conversation_id).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id,Conversation.id!=conv.id).order_by(Message.created_at.desc()).limit(12)).all()
+    previous=db.execute(select(Message.role,Message.content).join(Conversation,Conversation.id==Message.conversation_id).where(Conversation.company_id==user.company_id,Conversation.user_id==user.id,Conversation.id!=conv.id).order_by(Message.created_at.desc()).limit(12)).all() if user.memory_enabled else []
     if previous: prompt+="\n\nContexto recente de outras conversas deste mesmo usuário (pode estar desatualizado):\n"+"\n".join(f"{role}: {content[:600]}" for role,content in reversed(previous))
     attached=[]
     if data.file_ids:
         attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)]
     db.add(Message(conversation_id=conv.id,role="user",content=data.message)); db.flush()
     memory_pattern=re.compile(r"\b(meu nome é|pode me chamar de|eu gosto de|eu prefiro|prefiro|não gosto de|eu trabalho com|minha empresa (?:é|se chama)|sempre responda|quero que você)\b[^.!?\n]{2,220}",re.IGNORECASE)
-    for match in memory_pattern.finditer(data.message):
+    for match in memory_pattern.finditer(data.message) if user.memory_enabled else []:
         value=match.group(0).strip()
         exists=db.scalar(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id,func.lower(UserMemory.value)==value.lower()))
         if not exists: db.add(UserMemory(company_id=user.company_id,user_id=user.id,value=value))
@@ -519,20 +581,22 @@ async def ai_answer(data:ChatIn,user,db):
         if rag_hits: answer=ensure_rag_sources(answer,rag_hits)
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
-    db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
     route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "code" if model==settings.code_ai_model else "reasoning" if model==settings.reasoning_ai_model else "text"
+    db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008)))
+    if user.training_opt_in and not attached: db.add(TrainingSample(company_id=user.company_id,user_id=user.id,prompt=anonymize_training_text(data.message),response=anonymize_training_text(answer),model=model,category=route,consented_at=datetime.now(timezone.utc)))
+    db.commit()
     return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"image":None,"usage":{"input":inp,"output":out}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)
 @app.websocket("/ws/chat")
 async def chat_stream(ws:WebSocket):
     token=ws.query_params.get("token","")
-    try: user_id=jwt.decode(token,settings.secret_key,algorithms=["HS256"])["sub"]
+    try: token_payload=jwt.decode(token,settings.secret_key,algorithms=["HS256"]); user_id=token_payload["sub"]
     except (JWTError,KeyError): await ws.close(code=4401); return
     await ws.accept(); db=SessionLocal()
     try:
         user=db.get(User,user_id)
-        if not user or user.status!="active": await ws.close(code=4401); return
+        if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
         while True:
             payload=await ws.receive_json()
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})

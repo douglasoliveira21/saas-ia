@@ -49,3 +49,12 @@ def test_requested_file_extension_supports_common_formats():
     assert requested_file_extension("salve como relatorio.pdf") == "pdf"
     assert requested_file_extension("crie um arquivo JSON") == "json"
 
+
+def test_training_samples_remove_personal_and_secret_data():
+    from app.main import anonymize_training_text
+    raw = "Meu e-mail é pessoa@empresa.com, CPF 123.456.789-10 e API_KEY=segredo-super-secreto-123."
+    cleaned = anonymize_training_text(raw)
+    assert "pessoa@empresa.com" not in cleaned
+    assert "123.456.789-10" not in cleaned
+    assert "segredo-super-secreto-123" not in cleaned
+

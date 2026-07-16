@@ -17,6 +17,7 @@ import {
   FolderPlus,
   LayoutDashboard,
   LogOut,
+  Monitor,
   Menu,
   Maximize2,
   MessageSquare,
@@ -25,11 +26,13 @@ import {
   Plus,
   Send,
   Settings2,
+  Shield,
   Sparkles,
   Star,
   Trash2,
   Upload,
   Users,
+  UserRound,
   X,
 } from "lucide-react";
 type Conversation = {
@@ -58,9 +61,16 @@ type Me = {
   name: string;
   email: string;
   role: string;
-  company: { name: string } | null;
+  avatar?: string | null;
+  preferred_name?: string | null;
+  occupation?: string | null;
+  custom_instructions?: string | null;
+  location_metadata_enabled?: boolean;
+  training_opt_in?: boolean;
+  memory_enabled?: boolean;
+  company: { id: string; name: string } | null;
 };
-type Setting = "overview" | "agents" | "files" | "team" | "memory";
+type Setting = "general" | "account" | "privacy" | "billing" | "memory";
 const input =
   "w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm outline-none focus:border-zinc-600";
 export default function Workspace() {
@@ -294,7 +304,7 @@ export default function Workspace() {
           Novo bate-papo
         </button>
         <button
-          onClick={() => setSettings("overview")}
+          onClick={() => setSettings("general")}
           className="mt-2 flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm text-zinc-600 hover:bg-zinc-200"
         >
           <Settings2 size={16} />
@@ -365,11 +375,11 @@ export default function Workspace() {
           {profile && (
             <div className="absolute bottom-14 left-0 right-0 rounded-xl border border-zinc-200 bg-white p-2 shadow-xl">
               <button
-                onClick={() => setSettings("overview")}
+                onClick={() => { setProfile(false); setSettings("general"); }}
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-zinc-50"
               >
-                <CreditCard size={16} />
-                Plano e uso
+                <Settings2 size={16} />
+                Configurações
               </button>
               <button
                 onClick={() => {
@@ -556,6 +566,7 @@ export default function Workspace() {
           left={left}
           pct={pct}
           reload={load}
+          me={me}
         />
       )}
     </main>
@@ -697,6 +708,7 @@ function SettingsModal({
   left,
   pct,
   reload,
+  me,
 }: {
   tab: Setting;
   setTab: (v: Setting) => void;
@@ -706,13 +718,14 @@ function SettingsModal({
   left: number;
   pct: number;
   reload: () => void;
+  me: Me | null;
 }) {
   const nav: [Setting, string, typeof Bot][] = [
-    ["overview", "Visão geral", LayoutDashboard],
-    ["agents", "Agentes", Bot],
+    ["general", "Geral", UserRound],
+    ["account", "Conta", Monitor],
+    ["privacy", "Privacidade", Shield],
+    ["billing", "Cobrança", CreditCard],
     ["memory", "Memória", BrainCircuit],
-    ["team", "Equipe", Users],
-    ["files", "Arquivos", FileText],
   ];
   return (
     <div
@@ -723,7 +736,7 @@ function SettingsModal({
     >
       <div className="flex h-[min(760px,94vh)] w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl">
         <aside className="hidden w-56 border-r border-zinc-200 bg-zinc-50 p-4 md:block">
-          <h2 className="px-2 text-lg font-semibold">Personalizar</h2>
+          <h2 className="px-2 text-lg font-semibold">Configurações</h2>
           <div className="mt-5 space-y-1">
             {nav.map(([id, label, Icon]) => (
               <button
@@ -758,17 +771,63 @@ function SettingsModal({
               <X size={20} />
             </button>
           </div>
-          {tab === "overview" && (
+          {tab === "general" && <GeneralSettings me={me} reload={reload} />}
+          {tab === "account" && <AccountSettings me={me} />}
+          {tab === "privacy" && <PrivacySettings me={me} reload={reload} />}
+          {tab === "billing" && (
             <PlanPanel data={data} used={used} left={left} pct={pct} />
-          )}{" "}
-          {tab === "agents" && <AgentPanel reload={reload} />}{" "}
-          {tab === "memory" && <MemoryPanel />}{" "}
-          {tab === "team" && <TeamPanel />}{" "}
-          {tab === "files" && <FilesPanel reload={reload} />}
+          )}
+          {tab === "memory" && <MemorySettings me={me} reload={reload} />}
         </section>
       </div>
     </div>
   );
+}
+const occupations = ["Administração", "Atendimento ao cliente", "Direito", "Educação", "Engenharia", "Finanças", "Marketing e vendas", "Produto e design", "Programação e TI", "Recursos humanos", "Saúde", "Outro"];
+function Toggle({ checked, onChange, disabled=false }: { checked:boolean; onChange:(value:boolean)=>void; disabled?:boolean }) {
+  return <button type="button" disabled={disabled} onClick={() => onChange(!checked)} className={`relative h-7 w-12 shrink-0 rounded-full transition ${checked?"bg-zinc-950":"bg-zinc-300"} disabled:opacity-50`}><span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${checked?"left-6":"left-1"}`}/></button>;
+}
+function GeneralSettings({me,reload}:{me:Me|null;reload:()=>void}) {
+  const [form,setForm]=useState({name:me?.name||"",preferred_name:me?.preferred_name||"",occupation:me?.occupation||"",custom_instructions:me?.custom_instructions||""});
+  const [saving,setSaving]=useState(false); const [avatar,setAvatar]=useState<string>();
+  useEffect(()=>{ if(!me?.avatar)return; getAccessToken().then(token=>fetch(API+"/me/avatar",{headers:{Authorization:`Bearer ${token}`}})).then(r=>r.ok?r.blob():null).then(blob=>{if(blob)setAvatar(URL.createObjectURL(blob))}) },[me?.avatar]);
+  async function save(e:React.FormEvent){e.preventDefault();setSaving(true);await call("/me",{method:"PATCH",body:JSON.stringify(form)});await reload();setSaving(false)}
+  async function upload(e:React.ChangeEvent<HTMLInputElement>){const file=e.target.files?.[0];if(!file)return;setSaving(true);const body=new FormData();body.append("file",file);await call("/me/avatar",{method:"POST",body});setAvatar(URL.createObjectURL(file));await reload();setSaving(false)}
+  return <form onSubmit={save} className="mx-auto max-w-2xl">
+    <h2 className="text-3xl font-semibold">Geral</h2><p className="mt-2 text-sm text-zinc-500">Personalize como o SolvitSoft conversa e trabalha com você.</p>
+    <div className="mt-7 flex items-center gap-4"><span className="grid h-20 w-20 overflow-hidden place-items-center rounded-full bg-zinc-900 text-2xl font-semibold text-white">{avatar?<img src={avatar} className="h-full w-full object-cover" alt="Avatar"/>:(form.name[0]||"U").toUpperCase()}</span><label className="cursor-pointer rounded-xl border px-4 py-2 text-sm font-medium">Mudar avatar<input type="file" accept=".png,.jpg,.jpeg,.webp" className="hidden" onChange={upload}/></label></div>
+    <div className="mt-7 space-y-5">
+      <label className="block text-sm font-medium">Nome completo<input className={`${input} mt-2`} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>
+      <label className="block text-sm font-medium">Como o SolvitSoft deveria te chamar?<input className={`${input} mt-2`} value={form.preferred_name} onChange={e=>setForm({...form,preferred_name:e.target.value})}/></label>
+      <label className="block text-sm font-medium">O que melhor descreve seu trabalho?<select className={`${input} mt-2`} value={form.occupation} onChange={e=>setForm({...form,occupation:e.target.value})}><option value="">Selecione sua área</option>{occupations.map(x=><option key={x}>{x}</option>)}</select><span className="mt-2 block text-xs font-normal text-zinc-500">As respostas usarão exemplos e linguagem mais voltados para esta área.</span></label>
+      <label className="block text-sm font-medium">Instruções para o SolvitSoft<textarea rows={6} className={`${input} mt-2 resize-y`} value={form.custom_instructions} onChange={e=>setForm({...form,custom_instructions:e.target.value})}/><span className="mt-2 block text-xs font-normal text-zinc-500">O SolvitSoft levará isso em conta em todos os chats e no Cowork.</span></label>
+    </div><button disabled={saving} className="mt-6 flex items-center gap-2 rounded-xl bg-zinc-950 px-5 py-3 text-sm font-medium text-white disabled:opacity-50">{saving&&<Spinner className="border-zinc-500 border-t-white"/>}Salvar alterações</button>
+  </form>
+}
+function AccountSettings({me}:{me:Me|null}) {
+  const router=useRouter(); const [devices,setDevices]=useState<{id:string;device_name?:string;ip_address?:string;last_used_at?:string}[]>([]); const [loading,setLoading]=useState(true);
+  useEffect(()=>{call("/account/devices").then(setDevices).finally(()=>setLoading(false))},[]);
+  async function logoutAll(){if(!confirm("Desconectar todos os dispositivos, incluindo este?"))return;await call("/account/logout-all",{method:"POST"});localStorage.clear();router.push("/login")}
+  async function remove(){if(!confirm("Esta ação excluirá sua conta e seus dados pessoais. Deseja continuar?"))return;if(prompt('Digite EXCLUIR para confirmar')!=="EXCLUIR")return;await call("/account",{method:"DELETE"});localStorage.clear();router.push("/login")}
+  return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Conta</h2>
+    <div className="mt-7 rounded-2xl border p-5"><p className="text-sm text-zinc-500">ID da organização</p><p className="mt-2 break-all font-mono text-sm">{me?.company?.id||"—"}</p></div>
+    <div className="mt-5 rounded-2xl border"><div className="border-b p-5"><h3 className="font-semibold">Dispositivos confiáveis</h3><p className="mt-1 text-sm text-zinc-500">Todos os dispositivos com uma sessão ativa nesta conta.</p></div>{loading?<PanelLoading/>:devices.map(d=><div key={d.id} className="flex items-center gap-3 border-b p-4 last:border-0"><Monitor size={18}/><div className="flex-1"><p className="text-sm font-medium">{d.device_name||"Dispositivo"}</p><p className="text-xs text-zinc-500">{d.ip_address||"IP não identificado"} · {d.last_used_at?new Date(d.last_used_at).toLocaleString("pt-BR"):""}</p></div></div>)}</div>
+    <button onClick={logoutAll} className="mt-5 w-full rounded-xl border px-5 py-3 text-sm font-medium">Desconectar de todos os dispositivos</button>
+    <div className="mt-8 rounded-2xl border border-red-200 bg-red-50 p-5"><h3 className="font-semibold text-red-800">Excluir conta</h3><p className="mt-1 text-sm text-red-700">Remove seus dados pessoais, conversas, arquivos e acesso à plataforma.</p><button onClick={remove} className="mt-4 rounded-xl bg-red-600 px-5 py-3 text-sm font-medium text-white">Apagar minha conta</button></div>
+  </div>
+}
+function PrivacySettings({me,reload}:{me:Me|null;reload:()=>void}) {
+  const [saving,setSaving]=useState(false);
+  async function patch(body:object){setSaving(true);await call("/me",{method:"PATCH",body:JSON.stringify(body)});await reload();setSaving(false)}
+  async function location(enabled:boolean){if(!enabled){await patch({location_metadata_enabled:false});return}if(!navigator.geolocation){alert("Este navegador não oferece localização.");return}navigator.geolocation.getCurrentPosition(async p=>patch({location_metadata_enabled:true,location_lat:p.coords.latitude,location_lng:p.coords.longitude,location_timezone:Intl.DateTimeFormat().resolvedOptions().timeZone}),e=>alert("Não foi possível obter sua localização: "+e.message),{enableHighAccuracy:false,timeout:10000})}
+  return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Privacidade</h2><div className="mt-7 divide-y rounded-2xl border">
+    <div className="flex gap-5 p-5"><div className="flex-1"><h3 className="font-medium">Metadados de localização</h3><p className="mt-1 text-sm leading-6 text-zinc-500">Permite usar sua localização aproximada para respostas locais, clima e recomendações. Ao desabilitar, os dados armazenados são apagados.</p></div><Toggle checked={!!me?.location_metadata_enabled} onChange={location} disabled={saving}/></div>
+    <div className="flex gap-5 p-5"><div className="flex-1"><h3 className="font-medium">Ajude a melhorar nossos modelos de IA</h3><p className="mt-1 text-sm leading-6 text-zinc-500">Permitir o uso de suas conversas e sessões de programação para treinar e melhorar os modelos de IA da SolvitSoft.</p></div><Toggle checked={!!me?.training_opt_in} onChange={v=>patch({training_opt_in:v})} disabled={saving}/></div>
+  </div></div>
+}
+function MemorySettings({me,reload}:{me:Me|null;reload:()=>void}) {
+  const [saving,setSaving]=useState(false); async function toggle(value:boolean){setSaving(true);await call("/me",{method:"PATCH",body:JSON.stringify({memory_enabled:value})});await reload();setSaving(false)}
+  return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Memória</h2><div className="mt-7 flex gap-5 rounded-2xl border p-5"><div className="flex-1"><h3 className="font-medium">Gerar memória do histórico de conversas</h3><p className="mt-1 text-sm leading-6 text-zinc-500">Permitir que o SolvitSoft se lembre do contexto relevante dos seus chats. Esta configuração controla a memória tanto para chats quanto para projetos.</p></div><Toggle checked={me?.memory_enabled!==false} onChange={toggle} disabled={saving}/></div><div className="mt-6"><MemoryPanel/></div></div>
 }
 function PlanPanel({
   data,

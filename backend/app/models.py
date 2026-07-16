@@ -21,10 +21,14 @@ class User(Base):
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str|None]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True)
     name: Mapped[str]=mapped_column(String(120)); email: Mapped[str]=mapped_column(String(255),index=True); password_hash: Mapped[str]=mapped_column(String(255))
     role: Mapped[str]=mapped_column(String(20),default=Role.member.value); avatar: Mapped[str|None]=mapped_column(String(500)); status: Mapped[str]=mapped_column(String(20),default="active")
+    preferred_name: Mapped[str|None]=mapped_column(String(120)); occupation: Mapped[str|None]=mapped_column(String(80)); custom_instructions: Mapped[str|None]=mapped_column(Text)
+    location_metadata_enabled: Mapped[bool]=mapped_column(Boolean,default=False); training_opt_in: Mapped[bool]=mapped_column(Boolean,default=False); memory_enabled: Mapped[bool]=mapped_column(Boolean,default=True)
+    location_lat: Mapped[float|None]=mapped_column(Float); location_lng: Mapped[float|None]=mapped_column(Float); location_timezone: Mapped[str|None]=mapped_column(String(80)); token_version: Mapped[int]=mapped_column(Integer,default=0)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class RefreshToken(Base):
     __tablename__="refresh_tokens"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
     token_hash: Mapped[str]=mapped_column(String(64),unique=True); expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True)); revoked: Mapped[bool]=mapped_column(Boolean,default=False)
+    device_name: Mapped[str|None]=mapped_column(String(160)); user_agent: Mapped[str|None]=mapped_column(String(500)); ip_address: Mapped[str|None]=mapped_column(String(80)); last_used_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class Invitation(Base):
     __tablename__="invitations"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True)
     email: Mapped[str]=mapped_column(String(255)); role: Mapped[str]=mapped_column(String(20),default="member"); token: Mapped[str]=mapped_column(String(100),unique=True); accepted: Mapped[bool]=mapped_column(Boolean,default=False); expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True))
@@ -50,3 +54,7 @@ class UserMemory(Base):
     __tablename__="user_memories"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
     value: Mapped[str]=mapped_column(Text); source: Mapped[str]=mapped_column(String(30),default="conversation"); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class TrainingSample(Base):
+    __tablename__="training_samples"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
+    prompt: Mapped[str]=mapped_column(Text); response: Mapped[str]=mapped_column(Text); model: Mapped[str]=mapped_column(String(160)); category: Mapped[str]=mapped_column(String(40),default="chat"); consented_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)

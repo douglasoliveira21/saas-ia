@@ -45,9 +45,16 @@ PLANS={
     "premium":{"price":99.90,"credits":3000,"api_budget":17.00,"users":30,"agents":30,"tokens":8000000},
     "enterprise":{"price":199.90,"credits":7000,"api_budget":38.00,"users":100,"agents":100,"tokens":20000000},
 }
+def normalized_intent_text(value:str)->str:
+    return "".join(char for char in unicodedata.normalize("NFKD",value.lower()) if not unicodedata.combining(char))
+def is_image_generation_request(message:str)->bool:
+    text=normalized_intent_text(message)
+    actions=r"(?:crie|criar|cria|gere|gerar|gera|faca|fazer|faz|produza|produzir|desenhe|desenhar|quero|gostaria|preciso)"
+    images=r"(?:imagem|iamgem|foto|fotografia|ilustracao|arte|logo|banner|desenho|wallpaper|capa|icone|thumbnail)"
+    return bool(re.search(rf"\b{actions}\b.{{0,100}}\b{images}\b|\b{images}\b.{{0,100}}\b{actions}\b",text))
 def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
     text=message.lower(); tokens=max(1,len(message)//4)+1800; images=[x for x in attached if x.mime_type.startswith("image/")]; audio=[x for x in attached if x.mime_type.startswith("audio/")]; documents=[x for x in attached if x not in images+audio]
-    if re.search(r"\b(crie|gere|faça|produza)\b.{0,60}\b(imagem|foto|ilustração|arte|logo|banner)\b",text) and not attached: return 20,.10,"image_generation"
+    if is_image_generation_request(message) and not attached: return 20,.10,"image_generation"
     if images: return 4*len(images),.02*len(images),"vision"
     if audio:
         minutes=sum(max(1,math.ceil(x.size/(1024*1024))) for x in audio); noisy=bool(re.search(r"\b(ruído|ruido|barulho)\b",text)); return max(3,minutes*(3 if noisy else 1)),minutes*(.012 if noisy else .006),"audio"
@@ -637,7 +644,7 @@ async def ai_answer(data:ChatIn,user,db):
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit(); queue_index(generated.id)
         return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","image":None,"usage":{"input":inp,"output":out}}
-    image_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|desenhe|desenhar)\b.{0,60}\b(imagem|iamgem|foto|fotografia|ilustração|ilustracao|arte|logo|banner|desenho)\b",data.message.lower()))
+    image_intent=is_image_generation_request(data.message)
     if image_intent and not attached:
         if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
         else:

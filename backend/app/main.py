@@ -2,7 +2,7 @@ import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, h
 from contextlib import suppress
 import smtplib
 from email.message import EmailMessage
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from zoneinfo import ZoneInfo
@@ -69,7 +69,38 @@ def image_provider_error(status_code:int|None)->tuple[int,str]:
     if status_code in {400,422}: return 422,"O provedor recusou este pedido de imagem. Tente reformular a descrição. Nenhum crédito foi consumido."
     return 503,"O provedor de imagens está temporariamente indisponível. Nenhum crédito foi consumido; tente novamente em instantes."
 
+def trusted_bfl_url(value:str)->bool:
+    parsed=urlparse(value)
+    hostname=(parsed.hostname or "").lower()
+    return parsed.scheme=="https" and (hostname=="bfl.ai" or hostname.endswith(".bfl.ai"))
+
 async def generate_image_b64(prompt:str)->tuple[str,str]:
+    if settings.bfl_api_key:
+        headers={"accept":"application/json","x-key":settings.bfl_api_key,"Content-Type":"application/json"}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(30,connect=10),follow_redirects=True) as client:
+                created=await client.post(f"{settings.bfl_base_url.rstrip('/')}/{settings.bfl_image_model}",headers=headers,json={"prompt":prompt,"width":1024,"height":1024,"output_format":"jpeg","prompt_upsampling":True})
+                if created.is_success:
+                    task=created.json(); polling_url=task["polling_url"]
+                    if not trusted_bfl_url(polling_url): raise ValueError("Invalid BFL polling URL")
+                    deadline=asyncio.get_running_loop().time()+120
+                    while asyncio.get_running_loop().time()<deadline:
+                        await asyncio.sleep(.75)
+                        polled=await client.get(polling_url,headers={"accept":"application/json","x-key":settings.bfl_api_key})
+                        polled.raise_for_status(); result=polled.json(); status=result.get("status")
+                        if status=="Ready":
+                            sample=result["result"]["sample"]
+                            if not trusted_bfl_url(sample): raise ValueError("Invalid BFL delivery URL")
+                            downloaded=await client.get(sample); downloaded.raise_for_status()
+                            if not downloaded.headers.get("content-type","").lower().startswith("image/") or len(downloaded.content)>20*1024*1024: raise ValueError("Invalid BFL image response")
+                            return base64.b64encode(downloaded.content).decode(),f"black-forest-labs/{settings.bfl_image_model}"
+                        if status in {"Request Moderated","Content Moderated"}: raise HTTPException(422,"O provedor recusou este pedido por suas regras de conteúdo. Reformule a descrição; nenhum crédito foi consumido.")
+                        if status in {"Error","Failed","Task not found"}:
+                            logger.error("BFL image generation failed task=%s result=%s",task.get("id"),json.dumps(result,ensure_ascii=False)[:1000]); break
+                else: logger.error("BFL image request failed status=%s body=%s",created.status_code,created.text[:1000])
+        except HTTPException: raise
+        except (httpx.HTTPError,KeyError,TypeError,ValueError): logger.exception("BFL FLUX.2 max generation failed; using DeepInfra fallback")
+        else: logger.warning("BFL FLUX.2 max did not complete; using DeepInfra fallback")
     models=list(dict.fromkeys([settings.image_ai_model,settings.image_fallback_ai_model]))
     last_status=None
     for model in models:
@@ -851,6 +882,7 @@ async def chat_stream(ws:WebSocket):
         if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
         while True:
             payload=await ws.receive_json()
+            if is_image_generation_request(str(payload.get("message",""))): await ws.send_json({"type":"status","content":"Gerando imagem em qualidade máxima com FLUX.2 max..." if settings.bfl_api_key else "Gerando imagem..."})
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})
             answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db))
             control_task=asyncio.create_task(ws.receive_json())

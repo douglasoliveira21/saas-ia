@@ -76,7 +76,7 @@ type Me = {
   memory_enabled?: boolean;
   company: { id: string; name: string } | null;
 };
-type Setting = "general" | "account" | "privacy" | "microsoft" | "billing" | "memory" | "admin";
+type Setting = "general" | "account" | "privacy" | "microsoft" | "billing" | "memory" | "guests" | "admin";
 const input =
   "w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm outline-none focus:border-zinc-600";
 export default function Workspace() {
@@ -742,9 +742,9 @@ function SettingsModal({
     ["account", "Conta", Monitor],
     ["privacy", "Privacidade", Shield],
     ["microsoft", "Microsoft 365", Cloud],
-    ["billing", "Cobrança", CreditCard],
     ["memory", "Memória", BrainCircuit],
   ];
+  if(["owner","admin","superadmin"].includes(me?.role||"")) nav.splice(4,0,["guests","Convidados",Users],["billing","Cobrança",CreditCard]);
   if(me?.role==="superadmin") nav.unshift(["admin","Administração",Crown]);
   return (
     <div
@@ -794,9 +794,10 @@ function SettingsModal({
           {tab === "account" && <AccountSettings me={me} />}
           {tab === "privacy" && <PrivacySettings me={me} reload={reload} />}
           {tab === "microsoft" && <MicrosoftSettings />}
-          {tab === "billing" && (
+          {tab === "billing" && ["owner","admin","superadmin"].includes(me?.role||"") && (
             <PlanPanel data={data} used={used} left={left} pct={pct} />
           )}
+          {tab === "guests" && ["owner","admin","superadmin"].includes(me?.role||"") && <TeamPanel />}
           {tab === "memory" && <MemorySettings me={me} reload={reload} />}
           {tab === "admin" && me?.role==="superadmin" && <AdminSettings />}
         </section>
@@ -1063,24 +1064,20 @@ function TeamPanel() {
   const [link, setLink] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [inviteMessage, setInviteMessage] = useState("");
   const load = useCallback(() => { setLoading(true); return call("/team").then(setItems).finally(() => setLoading(false)); }, []);
   useEffect(() => {
     load();
   }, [load]);
   async function invite(e: React.FormEvent) {
     e.preventDefault();
-    setSaving(true);
-    const x = await call("/team/invite", {
-      method: "POST",
-      body: JSON.stringify({ email, role: "member" }),
-    });
-    setLink(x.invite_url);
-    setEmail("");
-    setSaving(false);
+    setSaving(true);setInviteMessage("");
+    try{const x = await call("/team/invite", {method:"POST",body:JSON.stringify({email,role:"member"})});setLink(x.invite_url);setInviteMessage(x.email_delivery==="sent"?"Convite enviado por e-mail.":"Convite criado. Copie o link abaixo e envie ao convidado.");setEmail("")}catch(e){setInviteMessage((e as Error).message)}finally{setSaving(false)}
   }
   return (
     <div>
-      <h2 className="text-2xl font-semibold">Equipe</h2>
+      <h2 className="text-3xl font-semibold">Convidados</h2>
+      <p className="mt-2 text-sm text-zinc-500">Convide pessoas para colaborar. Convidados não acessam Cobrança nem podem enviar novos convites.</p>
       <form onSubmit={invite} className="mt-6 flex gap-2">
         <input
           className={input}
@@ -1099,6 +1096,7 @@ function TeamPanel() {
           {link}
         </p>
       )}
+      {inviteMessage && <p className="mt-3 text-sm text-zinc-600">{inviteMessage}</p>}
       <div className="mt-5 overflow-hidden rounded-2xl border">
         {loading && <PanelLoading />}
         {items.map((m) => (
@@ -1113,7 +1111,7 @@ function TeamPanel() {
               <p className="text-sm font-medium">{m.name}</p>
               <p className="text-xs text-zinc-500">{m.email}</p>
             </div>
-            <span className="text-xs capitalize text-zinc-500">{m.role}</span>
+            <span className="text-xs capitalize text-zinc-500">{m.role==="member"?"Convidado":m.role}</span>
           </div>
         ))}
       </div>

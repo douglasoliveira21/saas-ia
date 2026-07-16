@@ -324,7 +324,7 @@ def health(): return {"status":"ok","service":settings.app_name}
 def register(data:Register,request:Request,db:Session=Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"E-mail já cadastrado")
     company=Company(name=data.company_name,document=(data.document or "").strip() or None,email=data.email); db.add(company); db.flush()
-    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.flush(); ensure_specialist_agents(db,company.id,user.id); db.commit(); return refresh_pair(user,db,request)
+    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin"); db.add(user); db.flush(); ensure_specialist_agents(db,company.id,user.id); db.commit(); return refresh_pair(user,db,request)
 @app.post(API+"/auth/login")
 def login(data:Login,request:Request,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email))
@@ -466,9 +466,19 @@ def export_training(user=Depends(require_roles("superadmin")),db:Session=Depends
 def team(user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(User).where(User.company_id==user.company_id)).all()]
 @app.post(API+"/team/invite")
 def invite(data:InviteIn,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
-    if data.role not in ("admin","member"): raise HTTPException(400,"Perfil inválido")
+    if data.role not in ("member",): raise HTTPException(400,"Convites desta tela devem usar o perfil de convidado")
+    company=db.get(Company,user.company_id); active=db.scalar(select(func.count()).select_from(User).where(User.company_id==user.company_id,User.status=="active")) or 0; pending=db.scalar(select(func.count()).select_from(Invitation).where(Invitation.company_id==user.company_id,Invitation.accepted==False)) or 0
+    if active+pending>=PLANS.get(company.plan,PLANS["free"])["users"]: raise HTTPException(402,"O limite de usuários do plano foi atingido. Faça upgrade para adicionar convidados.")
+    if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"Este e-mail já possui uma conta")
     token=random_token(); item=Invitation(company_id=user.company_id,email=data.email,role=data.role,token=token,expires_at=datetime.now(timezone.utc)+timedelta(days=7)); db.add(item); db.commit()
-    return {"message":"Convite criado","invite_url":f"{settings.frontend_url}/convite?token={token}","email_delivery":"configure SMTP para envio automático" if not settings.smtp_host else "queued"}
+    invite_url=f"{settings.frontend_url}/convite?token={token}"; delivered=False
+    if settings.smtp_host and settings.smtp_user and settings.smtp_password:
+        try:
+            message=EmailMessage(); message["Subject"]=f"Você foi convidado para {company.name} na SolvitSoft IA"; message["From"]=settings.smtp_from or settings.smtp_user; message["To"]=data.email; message.set_content(f"Você recebeu um convite para entrar como convidado em {company.name}.\n\nAceite o convite:\n{invite_url}\n\nO link é válido por 7 dias.")
+            with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=20) as smtp: smtp.starttls(); smtp.login(settings.smtp_user,settings.smtp_password); smtp.send_message(message)
+            delivered=True
+        except Exception as exc: logger.error("Invitation email failed: %s",exc)
+    return {"message":"Convite criado","invite_url":invite_url,"email_delivery":"sent" if delivered else "manual"}
 @app.post(API+"/team/accept")
 def accept(data:AcceptInvite,db:Session=Depends(get_db)):
     inv=db.scalar(select(Invitation).where(Invitation.token==data.token,Invitation.accepted==False))

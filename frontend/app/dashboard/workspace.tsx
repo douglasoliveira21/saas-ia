@@ -1022,7 +1022,7 @@ function TeamPanel() {
 }
 function FilesPanel({ reload }: { reload: () => void }) {
   const [items, setItems] = useState<
-    { id: string; name: string; size: number }[]
+    { id: string; name: string; size: number; index_status: string; index_error?: string }[]
   >([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1030,6 +1030,11 @@ function FilesPanel({ reload }: { reload: () => void }) {
   useEffect(() => {
     load();
   }, [load]);
+  useEffect(() => {
+    if (!items.some((item) => ["pending", "processing"].includes(item.index_status))) return;
+    const timer = setInterval(load, 3000);
+    return () => clearInterval(timer);
+  }, [items, load]);
   async function upload(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
@@ -1041,6 +1046,11 @@ function FilesPanel({ reload }: { reload: () => void }) {
     reload();
     setSaving(false);
   }
+  async function reindex(id: string) {
+    await call(`/files/${id}/reindex`, { method: "POST" });
+    await load();
+  }
+  const statusLabel: Record<string, string> = { pending: "Na fila", processing: "Indexando", ready: "Pronto para IA", failed: "Falhou", unsupported: "Sem indexação" };
   return (
     <div>
       <div className="flex justify-between">
@@ -1059,12 +1069,13 @@ function FilesPanel({ reload }: { reload: () => void }) {
       <div className="mt-6 overflow-hidden rounded-2xl border">
         {loading && <PanelLoading />}
         {items.map((f) => (
-          <div key={f.id} className="flex gap-3 border-b p-4 last:border-0">
+          <div key={f.id} className="flex items-center gap-3 border-b p-4 last:border-0">
             <FileText size={18} />
-            <p className="flex-1 truncate text-sm">{f.name}</p>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm">{f.name}</p><p className={`mt-1 text-xs ${f.index_status === "failed" ? "text-red-600" : f.index_status === "ready" ? "text-emerald-600" : "text-zinc-400"}`} title={f.index_error}>{statusLabel[f.index_status] || f.index_status}</p></div>
             <span className="text-xs text-zinc-400">
               {(f.size / 1024).toFixed(1)} KB
             </span>
+            {["failed", "ready"].includes(f.index_status) && <button type="button" onClick={() => reindex(f.id)} className="rounded-lg border px-3 py-1.5 text-xs hover:bg-zinc-50">Reindexar</button>}
           </div>
         ))}
       </div>

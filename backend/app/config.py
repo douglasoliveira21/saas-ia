@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     deepinfra_native_url: str = "https://api.deepinfra.com/v1/inference"
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"
+    embedding_ai_model: str = "BAAI/bge-m3"
+    embedding_dimensions: int = 1024
+    rag_top_k: int = 8
+    rag_min_similarity: float = 0.32
     default_ai_model: str = "deepseek-ai/DeepSeek-V4-Flash"
     document_ai_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     code_ai_model: str = "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo"

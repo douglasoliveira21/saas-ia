@@ -539,7 +539,8 @@ def message_image(item_id:str,user=Depends(current_user),db:Session=Depends(get_
     if not item or not item.image_path: raise HTTPException(404,"Imagem não encontrada")
     path=pathlib.Path(item.image_path)
     if not path.is_file(): raise HTTPException(404,"Arquivo da imagem não encontrado")
-    return FileResponse(path,media_type="image/png",filename="solvitsoft-imagem.png")
+    is_jpeg=path.suffix.lower() in {".jpg",".jpeg"}
+    return FileResponse(path,media_type="image/jpeg" if is_jpeg else "image/png",filename="solvitsoft-imagem.jpg" if is_jpeg else "solvitsoft-imagem.png")
 @app.get(API+"/memories")
 def memories(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(UserMemory).where(UserMemory.company_id==user.company_id,UserMemory.user_id==user.id).order_by(UserMemory.created_at.desc())).all()]
 @app.delete(API+"/memories/{item_id}",status_code=204)
@@ -662,10 +663,13 @@ async def ai_answer(data:ChatIn,user,db):
             if res.is_error:
                 logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); raise HTTPException(502,"Falha técnica ao gerar imagem. Nenhum crédito foi consumido.")
             else:
-                generated=res.json()["data"][0]; raw=base64.b64decode(generated["b64_json"]); image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
-                image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}.png"; image_path.write_bytes(raw)
-        db.add(Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
-        return {"conversation_id":conv.id,"message":answer,"model":settings.image_ai_model,"route":"image_generation","image":image_data,"usage":{"input":0,"output":0}}
+                generated=res.json()["data"][0]; raw=base64.b64decode(generated["b64_json"]); image_data=True; answer="Imagem criada conforme sua solicitação."
+                suffix=".jpg" if raw.startswith(b"\xff\xd8\xff") else ".png"
+                image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}{suffix}"; image_path.write_bytes(raw)
+        assistant_message=Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)
+        db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
+        image_url=f"/messages/{assistant_message.id}/image" if image_data else None
+        return {"conversation_id":conv.id,"message":answer,"model":settings.image_ai_model,"route":"image_generation","image":image_url,"usage":{"input":0,"output":0}}
     rag_hits=[]
     if not attached and settings.deepinfra_api_key:
         ready_query=select(File.id).outerjoin(Folder,Folder.id==File.folder_id).where(File.company_id==user.company_id,File.index_status=="ready")
@@ -846,6 +850,14 @@ async def chat_stream(ws:WebSocket):
             for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
             await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"image":result.get("image"),"usage":result["usage"]})
     except WebSocketDisconnect: pass
+    except HTTPException as exc:
+        db.rollback()
+        detail=exc.detail
+        message=detail.get("message","Erro ao processar a solicitação.") if isinstance(detail,dict) else str(detail)
+        with suppress(Exception): await ws.send_json({"type":"error","content":message})
+    except Exception:
+        db.rollback(); logger.exception("Falha inesperada no chat em tempo real")
+        with suppress(Exception): await ws.send_json({"type":"error","content":"Não foi possível concluir a resposta. Tente novamente em instantes."})
     finally:
         if answer_task and not answer_task.done():
             answer_task.cancel()

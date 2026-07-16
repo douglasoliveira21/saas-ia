@@ -254,7 +254,7 @@ export default function Workspace() {
             message: prompt,
           }),
         );
-      socket.onmessage = (e) => {
+      socket.onmessage = async (e) => {
         const p = JSON.parse(e.data);
         if (p.type === "status")
           setMessages((v) => v.map((m) => m.id === aid ? { ...m, status: p.content } : m));
@@ -266,12 +266,24 @@ export default function Workspace() {
           );
         if (p.type === "done") {
           setSelected(p.conversation_id);
-          if (p.image)
-            setMessages((v) =>
-              v.map((m) => (m.id === aid ? { ...m, image: p.image } : m)),
-            );
+          if (p.image) {
+            try {
+              const response=await fetch(API+p.image,{headers:{Authorization:`Bearer ${token}`}});
+              if (!response.ok) throw new Error("Não foi possível carregar a imagem gerada.");
+              const image=URL.createObjectURL(await response.blob());
+              setMessages((v) => v.map((m) => (m.id === aid ? { ...m, image } : m)));
+            } catch (imageError) {
+              setError((imageError as Error).message);
+            }
+          }
           socket.close();
           load();
+        }
+        if (p.type === "error") {
+          const message=p.content||"Não foi possível concluir a resposta.";
+          setMessages((v)=>v.map((m)=>m.id===aid?{...m,content:message,status:undefined}:m));
+          setError(message);
+          socket.close();
         }
         if (p.type === "stopped") {
           setMessages((v) => v.map((m) => m.id === aid ? { ...m, content: m.content || "Resposta interrompida.", status: undefined } : m));

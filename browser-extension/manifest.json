@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SolvitSoft IA",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Use a IA SolvitSoft com o conteúdo da página atual.",
   "minimum_chrome_version": "114",
   "permissions": ["activeTab", "scripting", "storage", "sidePanel", "clipboardWrite"],

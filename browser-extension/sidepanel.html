@@ -1,1 +1,24 @@
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SolvitSoft IA</title><link rel="stylesheet" href="style.css"></head><body><header><span class="logo">S</span><div><strong>SolvitSoft IA</strong><small>Assistente do navegador</small></div></header><section id="login"><h2>Entrar</h2><input id="email" type="email" placeholder="E-mail"><input id="password" type="password" placeholder="Senha"><button id="loginButton">Entrar na SolvitSoft</button><p id="loginError" class="error"></p></section><main id="app" hidden><div class="context"><label><input id="pageContext" type="checkbox" checked> Usar texto da página</label><label><input id="screenshot" type="checkbox"> Usar captura visível</label></div><textarea id="prompt" placeholder="O que deseja fazer com esta página?"></textarea><button id="send">Perguntar</button><div id="status"></div><article id="answer"></article><button id="insert" class="secondary">Inserir resposta no campo selecionado</button><button id="copy" class="secondary">Copiar resposta</button><button id="logout" class="secondary">Sair</button></main><script src="sidepanel.js"></script></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SolvitSoft IA</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <header><span class="logo">S</span><div class="brand"><strong>SolvitSoft IA</strong><small>Assistente do navegador</small></div><span class="online" title="Conectado"></span></header>
+  <section id="login" class="login-card">
+    <span class="hero-logo">S</span><h1>Bem-vindo</h1><p>Entre para usar sua IA em qualquer página.</p>
+    <label>E-mail<input id="email" type="email" placeholder="voce@empresa.com"></label>
+    <label>Senha<input id="password" type="password" placeholder="Sua senha"></label>
+    <button id="loginButton">Entrar na SolvitSoft</button><p id="loginError" class="error"></p>
+  </section>
+  <main id="app" hidden>
+    <div class="context">
+      <label><input id="pageContext" type="checkbox" checked><span><b>Texto da página</b><small>Título, seleção e conteúdo visível</small></span></label>
+      <label><input id="screenshot" type="checkbox"><span><b>Captura da tela</b><small>Analisa visualmente a área visível</small></span></label>
+    </div>
+    <section id="thread" class="thread"><div id="empty" class="empty"><span>✦</span><h2>Como posso ajudar?</h2><p>Analise, resuma, revise ou produza conteúdo usando a página aberta.</p></div><article id="answer" hidden></article></section>
+    <div class="composer"><textarea id="prompt" placeholder="Pergunte sobre esta página..."></textarea><button id="send" title="Enviar">↑</button></div>
+    <div id="status"></div>
+    <div id="actions" class="actions" hidden><button id="insert" class="secondary">Inserir no campo</button><button id="copy" class="secondary">Copiar</button></div>
+    <button id="logout" class="logout">Sair da conta</button>
+  </main>
+  <script src="sidepanel.js"></script>
+</body></html>

@@ -14,6 +14,18 @@ def test_image_provider_errors_explain_billing_and_prompt_failures():
     assert image_b64_from_data_url("data:image/png;base64,aW1hZ2U=")=="aW1hZ2U="
 
 
+def test_meeting_analysis_detects_intent_and_groups_speakers():
+    from app.main import format_diarized_transcript, is_meeting_analysis_request
+    assert is_meeting_analysis_request("Analise os participantes e o tom de voz desta reunião")
+    transcript=format_diarized_transcript([
+        {"speaker_id":"speaker_0","start":0,"end":2,"text":"Bom dia."},
+        {"speaker_id":"speaker_0","start":2,"end":4,"text":"Vamos começar."},
+        {"speaker_id":"speaker_1","start":5,"end":7,"text":"Concordo."},
+    ])
+    assert "Falante 1 [00:00-00:04]: Bom dia. Vamos começar." in transcript
+    assert "Falante 2 [00:05-00:07]: Concordo." in transcript
+
+
 def test_web_sources_are_guaranteed_without_duplicating_existing_links():
     from app.main import ensure_web_sources
     results = [

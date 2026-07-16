@@ -330,7 +330,7 @@ export default function Workspace() {
       <div className="flex items-end gap-2">
         <label className="grid h-10 w-10 cursor-pointer place-items-center rounded-full hover:bg-zinc-100">
           <Paperclip size={19} />
-          <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+          <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac,.wav,.m4a,.ogg,.webm" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         </label>
         <textarea
           rows={1}
@@ -356,6 +356,7 @@ export default function Workspace() {
         )}
       </div>
       {file && <div className="mt-2 flex w-fit gap-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs"><FileText size={14}/>{file.name}<button type="button" onClick={() => setFile(null)}><X size={13}/></button></div>}
+      {file?.type.startsWith("audio/") && <p className="mt-2 text-xs text-zinc-500">Envie gravações somente com autorização dos participantes. A identificação usa rótulos de falante, não reconhecimento de identidade.</p>}
     </form>
   );
   return (

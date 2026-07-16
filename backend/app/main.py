@@ -755,7 +755,7 @@ async def chat_stream(ws:WebSocket):
     except WebSocketDisconnect: pass
     finally: db.close()
 @app.post(API+"/billing/checkout")
-def checkout(plan:str,user=Depends(require_roles("owner")),db:Session=Depends(get_db)):
+def checkout(plan:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
     if not settings.stripe_secret_key: raise HTTPException(503,"Stripe ainda não configurado")
     prices={"starter":settings.stripe_starter_price_id,"professional":settings.stripe_professional_price_id,"premium":settings.stripe_premium_price_id,"enterprise":settings.stripe_enterprise_price_id}; price=prices.get(plan)
     if not price: raise HTTPException(400,"Plano ou Price ID inválido")

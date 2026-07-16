@@ -32,3 +32,11 @@ def test_rag_sources_are_downloadable_and_deduplicated():
     answer = ensure_rag_sources("Resposta.", hits)
     assert "## Fontes internas" in answer
     assert answer.count("/api/v1/files/file-1/download") == 1
+
+
+def test_default_rag_storage_does_not_require_server_pgvector():
+    from sqlalchemy import JSON
+    from app.config import settings
+    from app.models import DocumentChunk
+    assert settings.rag_pgvector_enabled is False
+    assert isinstance(DocumentChunk.__table__.c.embedding.type, JSON)

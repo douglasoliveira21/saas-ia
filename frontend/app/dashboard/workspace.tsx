@@ -282,6 +282,24 @@ export default function Workspace() {
     total = data?.limits.tokens || 1,
     left = Math.max(0, total - used),
     pct = Math.min(100, (used / total) * 100);
+  const composer = (
+    <form
+      onSubmit={send}
+      className="w-full max-w-3xl rounded-2xl border border-zinc-300 bg-white p-3 shadow-xl"
+    >
+      <div className="flex items-end gap-2">
+        <label className="grid h-10 w-10 cursor-pointer place-items-center rounded-full hover:bg-zinc-100">
+          <Paperclip size={19} />
+          <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac" onChange={(e) => setFile(e.target.files?.[0] || null)} />
+        </label>
+        <textarea rows={1} value={text} onChange={(e) => setText(e.target.value)} placeholder="Envie uma mensagem..." className="min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none" />
+        <button disabled={busy || !text.trim()} className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300">
+          {busy ? <Spinner className="border-zinc-500 border-t-white" /> : <Send size={17} />}
+        </button>
+      </div>
+      {file && <div className="mt-2 flex w-fit gap-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs"><FileText size={14}/>{file.name}<button type="button" onClick={() => setFile(null)}><X size={13}/></button></div>}
+    </form>
+  );
   return (
     <main className="flex h-screen overflow-hidden bg-white text-zinc-950">
       {loading && <LoadingOverlay label={loading} />}
@@ -492,58 +510,26 @@ export default function Workspace() {
             </div>
           ))}
           {!messages.length && (
-            <div className="m-auto text-center">
+            <div className="m-auto flex w-full flex-col items-center text-center">
               <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-zinc-950 text-white">
                 <Sparkles />
               </span>
-              <h1 className="mt-5 text-2xl font-semibold">
-                Como posso ajudar?
+              <h1 className="mt-5 text-3xl font-semibold">
+                Bem-vindo, {me?.preferred_name?.trim() || me?.name || "usuário"}
               </h1>
               <p className="mt-2 text-sm text-zinc-500">
-                Pergunte, anexe um arquivo ou peça uma imagem.
+                Como o SolvitSoft pode ajudar você hoje?
               </p>
+              <div className="mt-8 w-full">{composer}</div>
+              <div className="mt-4 flex w-full max-w-xl items-center gap-3 text-xs text-zinc-500">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200"><div className="h-full rounded-full bg-zinc-800" style={{width:`${pct}%`}}/></div>
+                <span>{pct.toFixed(1).replace(".",",")}% do limite utilizado</span>
+              </div>
             </div>
           )}
           </div>
         </div>
-        <form
-          onSubmit={send}
-          className="mx-auto mb-5 w-[calc(100%-24px)] max-w-3xl rounded-2xl border border-zinc-300 bg-white p-3 shadow-xl"
-        >
-          <div className="flex items-end gap-2">
-            <label className="grid h-10 w-10 cursor-pointer place-items-center rounded-full hover:bg-zinc-100">
-              <Paperclip size={19} />
-              <input
-                type="file"
-                className="hidden"
-                accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-              />
-            </label>
-            <textarea
-              rows={1}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="Envie uma mensagem..."
-              className="min-h-10 flex-1 resize-none px-2 py-2 text-sm outline-none"
-            />
-            <button
-              disabled={busy || !text.trim()}
-              className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300"
-            >
-              {busy ? <Spinner className="border-zinc-500 border-t-white" /> : <Send size={17} />}
-            </button>
-          </div>
-          {file && (
-            <div className="mt-2 flex w-fit gap-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs">
-              <FileText size={14} />
-              {file.name}
-              <button type="button" onClick={() => setFile(null)}>
-                <X size={13} />
-              </button>
-            </div>
-          )}
-        </form>
+        {!!messages.length && <div className="mx-auto mb-5 w-[calc(100%-24px)] max-w-3xl">{composer}</div>}
       </section>
       {preview && (
         <div

@@ -34,7 +34,7 @@ from jose import jwt, JWTError
 
 app=FastAPI(title=settings.app_name,version="1.0.0",docs_url="/docs")
 logger=logging.getLogger("solvitsoft.ai")
-app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_origin_regex=r"^(chrome-extension|moz-extension|extension)://.*$",allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
 PLANS={"starter":{"tokens":500000,"users":5,"agents":3},"professional":{"tokens":3000000,"users":25,"agents":15},"enterprise":{"tokens":20000000,"users":250,"agents":100}}
 SPECIALIST_AGENTS=[

@@ -63,6 +63,7 @@ EMBEDDING_AI_MODEL=BAAI/bge-m3
 EMBEDDING_DIMENSIONS=1024
 RAG_TOP_K=8
 RAG_MIN_SIMILARITY=0.32
+RAG_PGVECTOR_ENABLED=false
 TAVILY_API_KEY=tvly-sua_chave
 TAVILY_BASE_URL=https://api.tavily.com
 DEFAULT_AI_MODEL=meta-llama/Meta-Llama-3.1-70B-Instruct
@@ -72,6 +73,8 @@ STRIPE_STARTER_PRICE_ID=price_...
 STRIPE_PROFESSIONAL_PRICE_ID=price_...
 STRIPE_ENTERPRISE_PRICE_ID=price_...
 ```
+
+`RAG_PGVECTOR_ENABLED=false` funciona em PostgreSQL padrão e armazena embeddings em JSON, calculando similaridade na aplicação. Use `true` somente quando o servidor PostgreSQL tiver a extensão `vector` instalada. O Docker Compose deste projeto usa `pgvector/pgvector` e ativa o modo vetorial automaticamente.
 
 Importante: `NEXT_PUBLIC_API_URL` é incorporada no build do frontend. Depois de alterá-la, faça **Rebuild**, não somente Restart.
 

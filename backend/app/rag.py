@@ -91,7 +91,7 @@ def _allowed(file:File,folder:Folder|None,linked_agent_id:str|None,user_id:str,u
 
 def retrieve_chunks(db:Session,company_id:str,user_id:str,user_role:str,query_text:str,query_embedding:list[float],agent_id:str|None=None,limit:int=8):
     statement=select(DocumentChunk,File,Folder,AgentFile.agent_id).join(File,File.id==DocumentChunk.file_id).outerjoin(Folder,Folder.id==File.folder_id).outerjoin(AgentFile,AgentFile.file_id==File.id).where(DocumentChunk.company_id==company_id,File.index_status=="ready")
-    if db.bind.dialect.name=="postgresql":
+    if db.bind.dialect.name=="postgresql" and settings.rag_pgvector_enabled:
         distance=DocumentChunk.embedding.cosine_distance(query_embedding); keyword=func.ts_rank_cd(func.to_tsvector(DocumentChunk.content),func.plainto_tsquery(query_text)); rows=db.execute(statement.add_columns(distance,keyword).order_by(distance).limit(max(100,limit*10))).all()
         candidates=[]
         for chunk,file,folder,linked_agent,distance,keyword_rank in rows:

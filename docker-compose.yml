@@ -25,6 +25,8 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: .env
+    environment:
+      RAG_PGVECTOR_ENABLED: ${RAG_PGVECTOR_ENABLED:-true}
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,6 +42,8 @@ services:
     restart: unless-stopped
     command: celery -A app.worker.celery worker --loglevel=info
     env_file: .env
+    environment:
+      RAG_PGVECTOR_ENABLED: ${RAG_PGVECTOR_ENABLED:-true}
     depends_on: [postgres, redis]
     volumes:
       - storage_data:/app/storage

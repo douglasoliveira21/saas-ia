@@ -4,6 +4,7 @@ from sqlalchemy import String, Text, Float, Integer, Boolean, DateTime, ForeignK
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 from app.database import Base
+from app.config import settings
 def uid(): return str(uuid.uuid4())
 def now(): return datetime.now(timezone.utc)
 class Role(str, enum.Enum): owner="owner"; admin="admin"; member="member"; superadmin="superadmin"
@@ -40,7 +41,7 @@ class File(Base):
     __tablename__="files"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id")); folder_id: Mapped[str|None]=mapped_column(ForeignKey("folders.id",ondelete="SET NULL")); name: Mapped[str]=mapped_column(String(255)); path: Mapped[str]=mapped_column(String(500)); mime_type: Mapped[str]=mapped_column(String(100)); size: Mapped[int]=mapped_column(Integer); extracted_text: Mapped[str|None]=mapped_column(Text); index_status: Mapped[str]=mapped_column(String(30),default="pending",index=True); index_error: Mapped[str|None]=mapped_column(Text); indexed_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class DocumentChunk(Base):
     __tablename__="document_chunks"; __table_args__=(Index("ix_document_chunks_company_file","company_id","file_id"),UniqueConstraint("file_id","chunk_index",name="uq_document_chunks_file_index"))
-    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),index=True); chunk_index: Mapped[int]=mapped_column(Integer); content: Mapped[str]=mapped_column(Text); locator: Mapped[str|None]=mapped_column(String(255)); token_estimate: Mapped[int]=mapped_column(Integer,default=0); embedding: Mapped[list[float]]=mapped_column(Vector(1024).with_variant(JSON,"sqlite")); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),index=True); chunk_index: Mapped[int]=mapped_column(Integer); content: Mapped[str]=mapped_column(Text); locator: Mapped[str|None]=mapped_column(String(255)); token_estimate: Mapped[int]=mapped_column(Integer,default=0); embedding: Mapped[list[float]]=mapped_column(Vector(1024).with_variant(JSON,"sqlite") if settings.rag_pgvector_enabled else JSON); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class AgentFile(Base):
     __tablename__="agent_files"; agent_id: Mapped[str]=mapped_column(ForeignKey("agents.id",ondelete="CASCADE"),primary_key=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),primary_key=True)
 class UsageLog(Base):

@@ -1,4 +1,6 @@
 import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib, math
+import smtplib
+from email.message import EmailMessage
 from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -28,7 +30,7 @@ from app.database import get_db, SessionLocal
 from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, UserSettingsIn
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, UserSettingsIn, AdminUserUpdate
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -62,6 +64,8 @@ def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
     if re.search(r"\b(pesquise|internet|notícia|hoje|agora|preço|cotação|clima|placar)\b",text): return 2+max(0,math.ceil((tokens-5000)/5000)),.01+tokens*.000001,"web_search"
     return 1+max(0,math.ceil((tokens-5000)/5000)),.003+tokens*.000001,"text"
 def reserve_company_usage(db:Session,user:User,message:str,attached:list[File])->tuple[int,float,str]:
+    if user.role=="superadmin":
+        credits,cost,route=estimate_charge(message,attached); return 0,0,route
     company=db.scalar(select(Company).where(Company.id==user.company_id).with_for_update()); credits,cost,route=estimate_charge(message,attached); plan=PLANS.get(company.plan,PLANS["free"])
     if company.credit_balance<credits: raise HTTPException(402,{"code":"credits_exhausted","message":"Seus créditos terminaram. Faça upgrade para continuar.","required":credits,"remaining":company.credit_balance})
     if company.api_budget_used+cost>plan["api_budget"]: raise HTTPException(402,{"code":"budget_exhausted","message":"O orçamento de API do plano foi atingido. Faça upgrade para continuar.","estimated_cost":cost,"remaining":round(plan["api_budget"]-company.api_budget_used,4)})
@@ -415,7 +419,36 @@ def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
     if user.role=="superadmin":
         usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0))).one()
         counts={"users":db.scalar(select(func.count()).select_from(User)),"agents":db.scalar(select(func.count()).select_from(Agent)),"conversations":db.scalar(select(func.count()).select_from(Conversation)),"files":db.scalar(select(func.count()).select_from(File)),"companies":db.scalar(select(func.count()).select_from(Company))}
-        return {"company":{"name":"Administração da plataforma","plan":"enterprise","status":"active"},"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS["enterprise"],"is_superadmin":True}
+        return {"company":{"name":"Administração da plataforma","plan":"Ilimitado","status":"active","credit_balance":999999999,"api_budget_used":0},"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":{**PLANS["enterprise"],"credits":999999999,"api_budget":999999999},"is_superadmin":True}
+@app.get(API+"/admin/users")
+def admin_users(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    rows=db.execute(select(User,Company).outerjoin(Company,Company.id==User.company_id).order_by(User.created_at.desc()).limit(1000)).all()
+    return [{**dump(account),"company":{"id":company.id,"name":company.name,"plan":company.plan,"status":company.status,"credit_balance":company.credit_balance,"api_budget_used":company.api_budget_used} if company else None} for account,company in rows]
+@app.patch(API+"/admin/users/{user_id}")
+def admin_update_user(user_id:str,data:AdminUserUpdate,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    account=db.get(User,user_id)
+    if not account: raise HTTPException(404,"Usuário não encontrado")
+    values=data.model_dump(exclude_unset=True); plan=values.pop("plan",None); password=values.pop("password",None)
+    if values.get("role")=="superadmin" and account.id!=user.id: raise HTTPException(403,"Não é permitido criar outro superadministrador por esta tela")
+    if values.get("status") not in {None,"active","inactive"}: raise HTTPException(400,"Status inválido")
+    for key,value in values.items(): setattr(account,key,value)
+    if password: account.password_hash=hash_password(password); account.token_version+=1; db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id))
+    if plan:
+        if plan not in PLANS: raise HTTPException(400,"Plano inválido")
+        company=db.get(Company,account.company_id); company.plan=plan; company.credit_balance=PLANS[plan]["credits"]; company.api_budget_used=0
+    db.commit(); return {"message":"Usuário atualizado"}
+@app.post(API+"/admin/users/{user_id}/reset-password")
+def admin_reset_password(user_id:str,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    account=db.get(User,user_id)
+    if not account: raise HTTPException(404,"Usuário não encontrado")
+    temporary=secrets.token_urlsafe(10)+"A1!"; account.password_hash=hash_password(temporary); account.token_version+=1; db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id)); db.commit(); delivered=False
+    if settings.smtp_host and settings.smtp_user and settings.smtp_password:
+        try:
+            message=EmailMessage(); message["Subject"]="Sua nova senha temporária — SolvitSoft IA"; message["From"]=settings.smtp_from or settings.smtp_user; message["To"]=account.email; message.set_content(f"Olá, {account.name}.\n\nSua senha temporária é:\n\n{temporary}\n\nEntre em {settings.frontend_url}/login e altere sua senha assim que possível. Todas as sessões anteriores foram desconectadas.")
+            with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=20) as smtp: smtp.starttls(); smtp.login(settings.smtp_user,settings.smtp_password); smtp.send_message(message)
+            delivered=True
+        except Exception as exc: logger.error("Password email failed for user %s: %s",account.id,exc)
+    return {"temporary_password":temporary,"email":account.email,"delivered":delivered,"message":"Senha temporária criada e sessões anteriores desconectadas"}
     cid=user.company_id; company=db.get(Company,cid); usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0)).where(UsageLog.company_id==cid)).one()
     counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
     return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}

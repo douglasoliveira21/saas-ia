@@ -13,3 +13,5 @@ class UserSettingsIn(BaseModel):
     name:str|None=Field(None,min_length=2,max_length=120); preferred_name:str|None=Field(None,max_length=120); occupation:str|None=Field(None,max_length=80); custom_instructions:str|None=Field(None,max_length=5000)
     location_metadata_enabled:bool|None=None; training_opt_in:bool|None=None; memory_enabled:bool|None=None
     location_lat:float|None=Field(None,ge=-90,le=90); location_lng:float|None=Field(None,ge=-180,le=180); location_timezone:str|None=Field(None,max_length=80)
+class AdminUserUpdate(BaseModel):
+    name:str|None=Field(None,min_length=2,max_length=120); email:EmailStr|None=None; status:str|None=None; role:str|None=None; plan:str|None=None; password:str|None=Field(None,min_length=8,max_length=128)

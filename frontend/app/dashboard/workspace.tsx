@@ -12,6 +12,7 @@ import {
   ChevronDown,
   Cloud,
   CreditCard,
+  Crown,
   Download,
   FileText,
   Folder,
@@ -75,7 +76,7 @@ type Me = {
   memory_enabled?: boolean;
   company: { id: string; name: string } | null;
 };
-type Setting = "general" | "account" | "privacy" | "microsoft" | "billing" | "memory";
+type Setting = "general" | "account" | "privacy" | "microsoft" | "billing" | "memory" | "admin";
 const input =
   "w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm outline-none focus:border-zinc-600";
 export default function Workspace() {
@@ -744,6 +745,7 @@ function SettingsModal({
     ["billing", "Cobrança", CreditCard],
     ["memory", "Memória", BrainCircuit],
   ];
+  if(me?.role==="superadmin") nav.unshift(["admin","Administração",Crown]);
   return (
     <div
       className="fixed inset-0 z-50 grid place-items-center bg-black/35 p-3 backdrop-blur-sm"
@@ -796,6 +798,7 @@ function SettingsModal({
             <PlanPanel data={data} used={used} left={left} pct={pct} />
           )}
           {tab === "memory" && <MemorySettings me={me} reload={reload} />}
+          {tab === "admin" && me?.role==="superadmin" && <AdminSettings />}
         </section>
       </div>
     </div>
@@ -855,6 +858,16 @@ function MicrosoftSettings() {
   async function disconnect(){if(!confirm("Desconectar a conta Microsoft 365?"))return;await call("/microsoft",{method:"DELETE"});load()}
   return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Microsoft 365</h2><p className="mt-2 text-sm text-zinc-500">Conecte Word, Excel, Outlook, PowerPoint, OneDrive, calendário e contatos à sua IA SolvitSoft.</p><div className="mt-7 rounded-2xl border p-6">{loading?<PanelLoading/>:<><div className="flex items-center gap-3"><Cloud/><div><p className="font-semibold">{state.connected?"Conta conectada":"Nenhuma conta conectada"}</p>{state.email&&<p className="text-sm text-zinc-500">{state.email}</p>}</div></div><button onClick={state.connected?disconnect:connect} className={`mt-6 rounded-xl px-5 py-3 text-sm font-medium ${state.connected?"border":"bg-zinc-950 text-white"}`}>{state.connected?"Desconectar Microsoft 365":"Entrar com Microsoft 365"}</button></>}</div></div>
 }
+type AdminUser={id:string;name:string;email:string;role:string;status:string;created_at:string;company:{id:string;name:string;plan:string;status:string;credit_balance:number;api_budget_used:number}|null};
+function AdminSettings(){
+  const [items,setItems]=useState<AdminUser[]>([]);const [loading,setLoading]=useState(true);const [search,setSearch]=useState("");
+  const load=()=>call("/admin/users").then(setItems).finally(()=>setLoading(false));useEffect(()=>{load()},[]);
+  async function update(id:string,body:object){await call(`/admin/users/${id}`,{method:"PATCH",body:JSON.stringify(body)});await load()}
+  async function edit(account:AdminUser){const name=prompt("Nome completo:",account.name);if(name===null)return;const email=prompt("E-mail:",account.email);if(email===null)return;const password=prompt("Nova senha (deixe vazio para manter):","");await update(account.id,{name,email,...(password?{password}:{})})}
+  async function reset(id:string){if(!confirm("Gerar uma nova senha temporária e desconectar todos os dispositivos deste usuário?"))return;const data=await call(`/admin/users/${id}/reset-password`,{method:"POST"});prompt(data.delivered?`A nova senha foi enviada para ${data.email}. Você também pode copiá-la:`:`O SMTP não enviou o e-mail. Copie e envie a senha para ${data.email} por um canal seguro:`,data.temporary_password)}
+  const filtered=items.filter(x=>(x.name+" "+x.email+" "+(x.company?.name||"")).toLowerCase().includes(search.toLowerCase()));
+  return <div><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Proprietário do sistema</p><h2 className="mt-1 text-3xl font-semibold">Administração global</h2><p className="mt-2 text-sm text-zinc-500">Usuários, empresas, planos e acessos de toda a SolvitSoft.</p></div><div className="rounded-2xl bg-zinc-950 px-5 py-3 text-white"><p className="text-xs text-zinc-300">Seu plano</p><p className="font-semibold">Ilimitado</p></div></div><input className={`${input} mt-7`} placeholder="Buscar nome, e-mail ou empresa..." value={search} onChange={e=>setSearch(e.target.value)}/>{loading?<PanelLoading/>:<div className="mt-5 space-y-3">{filtered.map(account=><div key={account.id} className="rounded-2xl border p-4"><div className="flex flex-wrap items-start gap-3"><span className="grid h-10 w-10 place-items-center rounded-full bg-zinc-900 text-white">{account.name[0]?.toUpperCase()}</span><div className="min-w-0 flex-1"><p className="font-semibold">{account.name}</p><p className="break-all text-xs text-zinc-500">{account.email}</p><p className="mt-1 text-xs text-zinc-500">{account.company?.name||"Sem empresa"} · Criado em {new Date(account.created_at).toLocaleDateString("pt-BR")}</p></div><button onClick={()=>edit(account)} className="rounded-lg border px-3 py-2 text-xs">Editar</button><button onClick={()=>reset(account.id)} className="rounded-lg border px-3 py-2 text-xs">Nova senha</button></div><div className="mt-4 grid gap-2 sm:grid-cols-3"><select value={account.company?.plan||"free"} disabled={!account.company||account.role==="superadmin"} onChange={e=>update(account.id,{plan:e.target.value})} className="rounded-lg border bg-white p-2 text-xs"><option value="free">Gratuito</option><option value="starter">Essencial</option><option value="professional">Profissional</option><option value="premium">Premium</option><option value="enterprise">Empresa</option></select><select value={account.status} disabled={account.role==="superadmin"} onChange={e=>update(account.id,{status:e.target.value})} className="rounded-lg border bg-white p-2 text-xs"><option value="active">Ativo</option><option value="inactive">Inativo</option></select><div className="rounded-lg bg-zinc-50 p-2 text-xs">{account.role==="superadmin"?"Superadmin · Ilimitado":`${account.company?.credit_balance||0} créditos · R$ ${(account.company?.api_budget_used||0).toFixed(2)}`}</div></div></div>)}</div>}</div>
+}
 function PlanPanel({
   data,
   used,
@@ -890,12 +903,12 @@ function PlanPanel({
               {data?.company.plan}
             </p>
           </div>
-          <button
+          {data?.company.plan !== "Ilimitado" && <button
             onClick={() => upgrade("professional")}
             className="rounded-xl bg-zinc-950 px-5 py-3 text-sm font-medium text-white"
           >
             Fazer upgrade
-          </button>
+          </button>}
         </div>
         <div className="mt-8">
           <div className="flex justify-between text-sm">
@@ -915,9 +928,9 @@ function PlanPanel({
           </p>
         </div>
       </div>
-      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+      {data?.company.plan !== "Ilimitado" && <div className="mt-6 grid gap-3 sm:grid-cols-2">
         {[["starter","Essencial","R$ 29,90","700 créditos"],["professional","Profissional","R$ 59,90","1.600 créditos"],["premium","Premium","R$ 99,90","3.000 créditos"],["enterprise","Empresa","R$ 199,90","7.000 créditos"]].map(([id,name,price,credits])=><div key={id} className="rounded-2xl border p-5"><p className="font-semibold">{name}</p><p className="mt-1 text-2xl font-semibold">{price}<span className="text-xs font-normal text-zinc-500">/mês</span></p><p className="mt-2 text-sm text-zinc-500">{credits}</p><button onClick={()=>upgrade(id)} className="mt-4 w-full rounded-xl bg-zinc-950 py-2.5 text-sm text-white">Escolher plano</button></div>)}
-      </div>
+      </div>}
       <div className="mt-5 grid gap-3 sm:grid-cols-4">
         {[
           ["Usuários", data?.counts.users],

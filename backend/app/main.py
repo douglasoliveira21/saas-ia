@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
 from cryptography.fernet import Fernet
 from sqlalchemy import select, func, or_, delete
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 import httpx, stripe
 from pypdf import PdfReader
@@ -37,7 +38,14 @@ from jose import jwt, JWTError
 
 app=FastAPI(title=settings.app_name,version="1.0.0",docs_url="/docs")
 logger=logging.getLogger("solvitsoft.ai")
-app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_origin_regex=r"^(chrome-extension|moz-extension|extension)://.*$",allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
+cors_origins=list(dict.fromkeys([
+    settings.frontend_url.rstrip("/"),
+    "http://localhost:3000",
+    "https://app.solvitsoft.com.br",
+    "https://solvitsoft.com.br",
+    "https://www.solvitsoft.com.br",
+]))
+app.add_middleware(CORSMiddleware,allow_origins=cors_origins,allow_origin_regex=r"^(chrome-extension|moz-extension|extension)://.*$",allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
 PLANS={
     "free":{"price":0,"credits":100,"api_budget":.50,"users":1,"agents":3,"tokens":500000},
@@ -767,26 +775,36 @@ def usage_estimate(data:ChatIn,user=Depends(current_user),db:Session=Depends(get
     return {"credits":credits,"estimated_api_cost":round(cost,4),"route":route,"credit_balance":company.credit_balance,"api_budget_remaining":round(plan["api_budget"]-company.api_budget_used,4)}
 @app.post(API+"/anonymous/chat")
 async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends(get_db)):
-    device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest(); ip=request.headers.get("x-forwarded-for",(request.client.host if request.client else "" )).split(",")[0].strip(); ip_hash=hashlib.sha256((ip+settings.secret_key).encode()).hexdigest()
-    allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash).with_for_update())
-    if not allowance:
-        if (db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3: raise HTTPException(402,{"code":"login_required","message":"O limite gratuito deste local foi utilizado. Crie uma conta para continuar."})
-        allowance=AnonymousAllowance(device_hash=device_hash,ip_hash=ip_hash,credit_balance=100,api_budget_used=0); db.add(allowance); db.flush()
-    credits,cost,route=estimate_charge(data.message,[])
-    if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
-    allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
-    if not settings.deepinfra_api_key: raise HTTPException(503,"IA não configurada")
-    if route=="image_generation":
-        async with httpx.AsyncClient(timeout=180) as client: response=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-        response.raise_for_status(); image="data:image/png;base64,"+response.json()["data"][0]["b64_json"]; answer="Imagem criada conforme sua solicitação."
-    else:
-        model={"code":settings.code_ai_model,"reasoning":settings.reasoning_ai_model}.get(route,settings.default_ai_model); system=OFFICIAL_PROMPT
-        if route=="web_search" and settings.tavily_api_key:
-            async with httpx.AsyncClient(timeout=30) as client: search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"search_depth":"basic","max_results":5})
-            if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
-        async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-        response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
-    db.commit(); return {"message":answer,"image":image,"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
+    try:
+        device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest(); ip=request.headers.get("x-forwarded-for",(request.client.host if request.client else "" )).split(",")[0].strip(); ip_hash=hashlib.sha256((ip+settings.secret_key).encode()).hexdigest()
+        allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash).with_for_update())
+        if not allowance:
+            if (db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3: raise HTTPException(402,{"code":"login_required","message":"O limite gratuito deste local foi utilizado. Crie uma conta para continuar."})
+            allowance=AnonymousAllowance(device_hash=device_hash,ip_hash=ip_hash,credit_balance=100,api_budget_used=0); db.add(allowance); db.flush()
+        credits,cost,route=estimate_charge(data.message,[])
+        if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
+        allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
+        if not settings.deepinfra_api_key: raise HTTPException(503,"IA não configurada")
+        if route=="image_generation":
+            async with httpx.AsyncClient(timeout=180) as client: response=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            response.raise_for_status(); image="data:image/png;base64,"+response.json()["data"][0]["b64_json"]; answer="Imagem criada conforme sua solicitação."
+        else:
+            model={"code":settings.code_ai_model,"reasoning":settings.reasoning_ai_model}.get(route,settings.default_ai_model); system=OFFICIAL_PROMPT
+            if route=="web_search" and settings.tavily_api_key:
+                async with httpx.AsyncClient(timeout=30) as client: search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"search_depth":"basic","max_results":5})
+                if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
+            async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
+        db.commit(); return {"message":answer,"image":image,"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError:
+        db.rollback(); logger.exception("Falha no banco durante chat anônimo")
+        raise HTTPException(503,{"code":"service_unavailable","message":"O chat gratuito está temporariamente indisponível. Tente novamente em instantes."})
+    except (httpx.HTTPError, KeyError, ValueError):
+        db.rollback(); logger.exception("Falha no provedor de IA durante chat anônimo")
+        raise HTTPException(502,{"code":"ai_provider_error","message":"Não foi possível obter a resposta da IA agora. Seus créditos não foram consumidos; tente novamente."})
 @app.post(API+"/anonymous/status")
 def anonymous_status(data:AnonymousStatusIn,request:Request,db:Session=Depends(get_db)):
     device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest()

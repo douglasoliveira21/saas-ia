@@ -61,6 +61,32 @@ def is_image_generation_request(message:str)->bool:
     actions=r"(?:crie|criar|cria|gere|gerar|gera|faca|fazer|faz|produza|produzir|desenhe|desenhar|quero|gostaria|preciso)"
     images=r"(?:imagem|iamgem|foto|fotografia|ilustracao|arte|logo|banner|desenho|wallpaper|capa|icone|thumbnail)"
     return bool(re.search(rf"\b{actions}\b.{{0,100}}\b{images}\b|\b{images}\b.{{0,100}}\b{actions}\b",text))
+
+def image_provider_error(status_code:int|None)->tuple[int,str]:
+    if status_code in {401,403}: return 503,"A geração de imagens está indisponível porque a credencial do provedor precisa ser verificada. Nenhum crédito foi consumido."
+    if status_code==402: return 503,"A geração de imagens está indisponível porque o saldo do provedor terminou. Nenhum crédito foi consumido; avise o administrador."
+    if status_code==429: return 503,"O provedor de imagens atingiu o limite de requisições. Nenhum crédito foi consumido; tente novamente em instantes."
+    if status_code in {400,422}: return 422,"O provedor recusou este pedido de imagem. Tente reformular a descrição. Nenhum crédito foi consumido."
+    return 503,"O provedor de imagens está temporariamente indisponível. Nenhum crédito foi consumido; tente novamente em instantes."
+
+async def generate_image_b64(prompt:str)->tuple[str,str]:
+    models=list(dict.fromkeys([settings.image_ai_model,settings.image_fallback_ai_model]))
+    last_status=None
+    for model in models:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(60,connect=10)) as client:
+                response=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":model,"prompt":prompt,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+        except httpx.HTTPError as exc:
+            logger.warning("DeepInfra image request failed model=%s error=%s",model,exc); continue
+        if response.is_success:
+            try: return response.json()["data"][0]["b64_json"],model
+            except (KeyError,IndexError,TypeError,ValueError): logger.exception("Invalid DeepInfra image response model=%s",model)
+        else:
+            last_status=response.status_code
+            logger.error("DeepInfra image generation failed model=%s status=%s body=%s",model,response.status_code,response.text[:1000])
+            if response.status_code in {401,402,403}: break
+    http_status,message=image_provider_error(last_status)
+    raise HTTPException(http_status,message)
 def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
     text=message.lower(); tokens=max(1,len(message)//4)+1800; images=[x for x in attached if x.mime_type.startswith("image/")]; audio=[x for x in attached if x.mime_type.startswith("audio/")]; documents=[x for x in attached if x not in images+audio]
     if is_image_generation_request(message) and not attached: return 20,.10,"image_generation"
@@ -658,18 +684,13 @@ async def ai_answer(data:ChatIn,user,db):
     if image_intent and not attached:
         if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
         else:
-            async with httpx.AsyncClient(timeout=180) as client:
-                res=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-            if res.is_error:
-                logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); raise HTTPException(502,"Falha técnica ao gerar imagem. Nenhum crédito foi consumido.")
-            else:
-                generated=res.json()["data"][0]; raw=base64.b64decode(generated["b64_json"]); image_data=True; answer="Imagem criada conforme sua solicitação."
-                suffix=".jpg" if raw.startswith(b"\xff\xd8\xff") else ".png"
-                image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}{suffix}"; image_path.write_bytes(raw)
+            encoded,image_model=await generate_image_b64(data.message); raw=base64.b64decode(encoded); image_data=True; answer="Imagem criada conforme sua solicitação."
+            suffix=".jpg" if raw.startswith(b"\xff\xd8\xff") else ".png"
+            image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}{suffix}"; image_path.write_bytes(raw)
         assistant_message=Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)
-        db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
+        db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=image_model if image_data else settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
         image_url=f"/messages/{assistant_message.id}/image" if image_data else None
-        return {"conversation_id":conv.id,"message":answer,"model":settings.image_ai_model,"route":"image_generation","image":image_url,"usage":{"input":0,"output":0}}
+        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","image":image_url,"usage":{"input":0,"output":0}}
     rag_hits=[]
     if not attached and settings.deepinfra_api_key:
         ready_query=select(File.id).outerjoin(Folder,Folder.id==File.folder_id).where(File.company_id==user.company_id,File.index_status=="ready")
@@ -790,8 +811,7 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
         allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
         if not settings.deepinfra_api_key: raise HTTPException(503,"IA não configurada")
         if route=="image_generation":
-            async with httpx.AsyncClient(timeout=180) as client: response=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-            response.raise_for_status(); image="data:image/png;base64,"+response.json()["data"][0]["b64_json"]; answer="Imagem criada conforme sua solicitação."
+            encoded,_=await generate_image_b64(data.message); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
         else:
             model={"code":settings.code_ai_model,"reasoning":settings.reasoning_ai_model}.get(route,settings.default_ai_model); system=OFFICIAL_PROMPT
             if route=="web_search" and settings.tavily_api_key:

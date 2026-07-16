@@ -3,6 +3,13 @@ def test_health_contract():
     assert health()["status"] == "ok"
 
 
+def test_image_provider_errors_explain_billing_and_prompt_failures():
+    from app.main import image_provider_error
+    assert "saldo do provedor" in image_provider_error(402)[1]
+    assert "reformular" in image_provider_error(400)[1]
+    assert "temporariamente indisponível" in image_provider_error(500)[1]
+
+
 def test_web_sources_are_guaranteed_without_duplicating_existing_links():
     from app.main import ensure_web_sources
     results = [

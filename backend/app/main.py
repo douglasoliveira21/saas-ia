@@ -35,6 +35,24 @@ logger=logging.getLogger("solvitsoft.ai")
 app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
 PLANS={"starter":{"tokens":500000,"users":5,"agents":3},"professional":{"tokens":3000000,"users":25,"agents":15},"enterprise":{"tokens":20000000,"users":250,"agents":100}}
+SPECIALIST_AGENTS=[
+    ("Marketing","Estratégia, marca, conteúdo, mídia, SEO e crescimento","Você é um diretor de Marketing sênior. Domina posicionamento, branding, pesquisa de mercado, ICP, jornada, copywriting, conteúdo, SEO, mídia paga, CRM, analytics, funis, CAC, LTV e experimentação. Entregue estratégias executáveis, métricas, cronogramas e exemplos alinhados ao negócio."),
+    ("Recursos Humanos","Cultura, talentos, desempenho e desenvolvimento","Você é um executivo de Recursos Humanos especialista em recrutamento, seleção por competências, employer branding, cultura, clima, desempenho, cargos e salários, treinamento, liderança, people analytics e retenção. Produza políticas e planos práticos, inclusivos e mensuráveis."),
+    ("Departamento Pessoal","Rotinas trabalhistas, folha e obrigações","Você é especialista brasileiro em Departamento Pessoal. Domina admissão, folha, férias, ponto, benefícios, afastamentos, rescisões, eSocial, FGTS Digital, DCTFWeb e rotinas trabalhistas. Peça dados faltantes, apresente cálculos auditáveis e alerte que regras e convenções coletivas devem ser confirmadas na legislação vigente."),
+    ("Jurídico","Contratos, riscos, compliance e legislação","Você é um consultor jurídico empresarial brasileiro sênior. Analisa contratos, riscos, compliance, LGPD, societário, consumidor, trabalhista e contencioso preventivo. Estruture pareceres com fatos, questões, fundamentos, riscos e recomendações; pesquise legislação atual quando necessário e deixe claro que a resposta não substitui advogado responsável."),
+    ("Fiscal e Tributário","Tributos, obrigações e planejamento fiscal","Você é especialista fiscal e tributário brasileiro. Domina Simples Nacional, Lucro Presumido e Real, ICMS, ISS, IPI, PIS/COFINS, retenções, SPED, notas fiscais e obrigações acessórias. Faça análises rastreáveis, indique premissas e exija validação da legislação federal, estadual e municipal vigente."),
+    ("Comercial","Vendas, prospecção, negociação e receita","Você é um diretor comercial B2B/B2C. Domina ICP, prospecção, qualificação, discovery, SPIN, MEDDIC, propostas, negociação, CRM, forecast, canais, metas e remuneração variável. Crie scripts, cadências, playbooks, indicadores e planos orientados a receita."),
+    ("Financeiro","Fluxo de caixa, orçamento e análise financeira","Você é um CFO experiente. Domina fluxo de caixa, DRE, orçamento, capital de giro, custos, precificação, viabilidade, indicadores, cobrança, tesouraria e cenários. Mostre premissas, cálculos, riscos e recomendações acionáveis; não trate projeções como garantias."),
+    ("Contabilidade","Contabilidade societária e gerencial","Você é contador empresarial sênior. Domina conciliações, plano de contas, lançamentos, balancete, DRE, balanço, fluxo de caixa, CPCs e análise gerencial. Organize informações com rigor, rastreabilidade e ressalvas sobre validação pelo contador responsável."),
+    ("Atendimento ao Cliente","Suporte, sucesso do cliente e experiência","Você é líder de Customer Experience e Customer Success. Domina atendimento omnichannel, SLAs, base de conhecimento, NPS, CSAT, CES, onboarding, retenção, churn, gestão de crises e comunicação empática. Crie respostas e processos claros, humanos e mensuráveis."),
+    ("Tecnologia e TI","Software, infraestrutura, dados e segurança","Você é um CTO e arquiteto de software sênior. Domina produto digital, programação moderna, APIs, cloud, DevOps, bancos de dados, observabilidade, segurança, IA e governança. Proponha soluções seguras, escaláveis, testáveis e com trade-offs explícitos."),
+    ("Gestão Empresarial","Estratégia, processos e execução","Você é um consultor de gestão empresarial sênior. Domina planejamento estratégico, OKRs, processos, indicadores, governança, operações, projetos, qualidade e transformação organizacional. Converta problemas em diagnóstico, prioridades, responsáveis, prazos e métricas."),
+]
+
+def ensure_specialist_agents(db:Session,company_id:str,user_id:str)->None:
+    existing=set(db.scalars(select(Agent.name).where(Agent.company_id==company_id)).all())
+    for name,description,prompt in SPECIALIST_AGENTS:
+        if name not in existing: db.add(Agent(company_id=company_id,created_by=user_id,name=name,description=description,ai_model=settings.default_ai_model,system_prompt=prompt,temperature=.35,permissions={"builtin":True}))
 
 def ensure_web_sources(answer:str,results:list[dict])->str:
     """Guarantee that every web answer exposes the sources returned by search."""
@@ -199,6 +217,15 @@ def ensure_superadmin():
         db.commit()
     finally: db.close()
 @app.on_event("startup")
+def seed_specialist_agents():
+    db=SessionLocal()
+    try:
+        for company in db.scalars(select(Company)).all():
+            creator=db.scalar(select(User).where(User.company_id==company.id,User.status=="active").order_by(User.created_at))
+            if creator: ensure_specialist_agents(db,company.id,creator.id)
+        db.commit()
+    finally: db.close()
+@app.on_event("startup")
 def resume_pending_rag_indexes():
     db=SessionLocal()
     try: pending=db.scalars(select(File.id).where(File.index_status=="pending",File.mime_type.in_(INDEXABLE_MIMES)).limit(1000)).all()
@@ -245,7 +272,7 @@ def health(): return {"status":"ok","service":settings.app_name}
 def register(data:Register,request:Request,db:Session=Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"E-mail já cadastrado")
     company=Company(name=data.company_name,document=(data.document or "").strip() or None,email=data.email); db.add(company); db.flush()
-    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.commit(); return refresh_pair(user,db,request)
+    user=User(company_id=company.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="owner"); db.add(user); db.flush(); ensure_specialist_agents(db,company.id,user.id); db.commit(); return refresh_pair(user,db,request)
 @app.post(API+"/auth/login")
 def login(data:Login,request:Request,db:Session=Depends(get_db)):
     user=db.scalar(select(User).where(User.email==data.email))
@@ -333,11 +360,14 @@ def accept(data:AcceptInvite,db:Session=Depends(get_db)):
 def agents(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Agent).where(Agent.company_id==user.company_id).order_by(Agent.created_at.desc())).all()]
 @app.post(API+"/agents",status_code=201)
 def create_agent(data:AgentIn,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
-    company=db.get(Company,user.company_id); count=db.scalar(select(func.count()).select_from(Agent).where(Agent.company_id==user.company_id))
+    company=db.get(Company,user.company_id); count=sum(1 for item in db.scalars(select(Agent.permissions).where(Agent.company_id==user.company_id)).all() if not (item or {}).get("builtin"))
     if count>=PLANS.get(company.plan,PLANS["starter"])["agents"]: raise HTTPException(402,"Limite de agentes do plano atingido")
     item=Agent(company_id=user.company_id,created_by=user.id,**data.model_dump()); db.add(item); db.commit(); db.refresh(item); return dump(item)
 @app.delete(API+"/agents/{item_id}",status_code=204)
-def delete_agent(item_id:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)): db.delete(tenant_get(db,Agent,item_id,user)); db.commit()
+def delete_agent(item_id:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
+    item=tenant_get(db,Agent,item_id,user)
+    if (item.permissions or {}).get("builtin"): raise HTTPException(400,"Agentes especialistas do sistema não podem ser excluídos")
+    db.delete(item); db.commit()
 @app.get(API+"/folders")
 def folders(user=Depends(current_user),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Folder).where(Folder.company_id==user.company_id)).all()]
 @app.post(API+"/folders",status_code=201)

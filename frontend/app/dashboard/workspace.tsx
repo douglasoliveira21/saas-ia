@@ -41,6 +41,7 @@ type Conversation = {
   folder_id: string | null;
   favorite: boolean;
   created_at: string;
+  agent_id: string | null;
 };
 type ChatMessage = {
   id: string;
@@ -50,6 +51,7 @@ type ChatMessage = {
   status?: string;
 };
 type FolderType = { id: string; name: string };
+type AgentType = { id:string; name:string; description:string; permissions?:{builtin?:boolean} };
 type Dash = {
   company: { name: string; plan: string };
   counts: Record<string, number>;
@@ -79,6 +81,8 @@ export default function Workspace() {
   const [me, setMe] = useState<Me | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [folders, setFolders] = useState<FolderType[]>([]);
+  const [agents, setAgents] = useState<AgentType[]>([]);
+  const [agentId, setAgentId] = useState("");
   const [selected, setSelected] = useState<string>();
   const [folderId, setFolderId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -99,12 +103,14 @@ export default function Workspace() {
         call("/me"),
         call("/conversations"),
         call("/folders"),
+        call("/agents"),
       ])
-        .then(([d, m, c, f]) => {
+        .then(([d, m, c, f, a]) => {
           setData(d);
           setMe(m);
           setConversations(c);
           setFolders(f);
+          setAgents(a);
         })
         .catch(() => router.push("/login"))
         .finally(() => setLoading("")),
@@ -135,6 +141,7 @@ export default function Workspace() {
     try {
       setSelected(c.id);
       setFolderId(c.folder_id || "");
+      setAgentId(c.agent_id || "");
       setMobile(false);
       const history: ChatMessage[] = await call(`/conversations/${c.id}/messages`);
       const token = localStorage.getItem("access_token") || "";
@@ -159,6 +166,7 @@ export default function Workspace() {
     setSelected(undefined);
     setMessages([]);
     setFolderId("");
+    setAgentId("");
     setFile(null);
     setMobile(false);
   }
@@ -233,6 +241,7 @@ export default function Workspace() {
           JSON.stringify({
             conversation_id: selected || null,
             folder_id: folderId || null,
+            agent_id: agentId || null,
             file_ids,
             message: prompt,
           }),
@@ -403,9 +412,20 @@ export default function Workspace() {
                 "Novo bate-papo"}
             </p>
             <p className="text-[11px] text-zinc-400">
-              IA automática para texto, documentos e imagens
+              {agents.find((agent)=>agent.id===agentId)?.description || "IA automática para texto, documentos e imagens"}
             </p>
           </div>
+          <div className="flex items-center gap-2">
+            <select
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+              disabled={!!selected}
+              title={selected ? "O especialista fica vinculado a esta conversa" : "Escolha um agente especialista"}
+              className="max-w-[190px] rounded-lg border border-zinc-200 bg-white px-3 py-2 text-xs disabled:cursor-not-allowed disabled:bg-zinc-50"
+            >
+              <option value="">SolvitSoft Automático</option>
+              {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+            </select>
           {selected && (
             <select
               value={folderId}
@@ -423,6 +443,7 @@ export default function Workspace() {
               ))}
             </select>
           )}
+          </div>
         </header>
         {error && (
           <div className="mx-auto mt-3 w-full max-w-3xl rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">

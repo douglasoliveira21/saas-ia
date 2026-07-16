@@ -13,8 +13,8 @@ class Company(Base):
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
     name: Mapped[str]=mapped_column(String(160)); document: Mapped[str|None]=mapped_column(String(40),unique=True)
     email: Mapped[str]=mapped_column(String(255)); phone: Mapped[str|None]=mapped_column(String(30))
-    plan: Mapped[str]=mapped_column(String(30),default="starter"); stripe_customer_id: Mapped[str|None]=mapped_column(String(100))
-    stripe_subscription_id: Mapped[str|None]=mapped_column(String(100)); status: Mapped[str]=mapped_column(String(30),default="active")
+    plan: Mapped[str]=mapped_column(String(30),default="free"); stripe_customer_id: Mapped[str|None]=mapped_column(String(100))
+    stripe_subscription_id: Mapped[str|None]=mapped_column(String(100)); status: Mapped[str]=mapped_column(String(30),default="active"); credit_balance: Mapped[int]=mapped_column(Integer,default=100); api_budget_used: Mapped[float]=mapped_column(Float,default=0)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class User(Base):
     __tablename__="users"; __table_args__=(UniqueConstraint("company_id","email"),)
@@ -49,7 +49,10 @@ class DocumentChunk(Base):
 class AgentFile(Base):
     __tablename__="agent_files"; agent_id: Mapped[str]=mapped_column(ForeignKey("agents.id",ondelete="CASCADE"),primary_key=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),primary_key=True)
 class UsageLog(Base):
-    __tablename__="usage_logs"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id"),index=True); model: Mapped[str]=mapped_column(String(160)); input_tokens: Mapped[int]=mapped_column(Integer,default=0); output_tokens: Mapped[int]=mapped_column(Integer,default=0); cost: Mapped[float]=mapped_column(Float,default=0); audio_minutes: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    __tablename__="usage_logs"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id"),index=True); model: Mapped[str]=mapped_column(String(160)); input_tokens: Mapped[int]=mapped_column(Integer,default=0); output_tokens: Mapped[int]=mapped_column(Integer,default=0); cost: Mapped[float]=mapped_column(Float,default=0); credits: Mapped[int]=mapped_column(Integer,default=0); audio_minutes: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class AnonymousAllowance(Base):
+    __tablename__="anonymous_allowances"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); device_hash: Mapped[str]=mapped_column(String(64),unique=True,index=True); ip_hash: Mapped[str]=mapped_column(String(64),index=True); credit_balance: Mapped[int]=mapped_column(Integer,default=100); api_budget_used: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class UserMemory(Base):
     __tablename__="user_memories"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)

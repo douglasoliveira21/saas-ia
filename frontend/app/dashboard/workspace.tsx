@@ -56,10 +56,10 @@ type ChatMessage = {
 type FolderType = { id: string; name: string };
 type AgentType = { id:string; name:string; description:string; permissions?:{builtin?:boolean} };
 type Dash = {
-  company: { name: string; plan: string };
+  company: { name: string; plan: string; credit_balance:number; api_budget_used:number };
   counts: Record<string, number>;
   usage: { tokens: number; cost: number };
-  limits: { tokens: number };
+  limits: { tokens: number; credits:number; api_budget:number };
 };
 type Me = {
   id: string;
@@ -240,6 +240,10 @@ export default function Workspace() {
         const uploaded = await call("/files", { method: "POST", body });
         file_ids = [uploaded.id];
       }
+      if (file_ids.length) {
+        const estimate=await call("/usage/estimate",{method:"POST",body:JSON.stringify({conversation_id:selected||null,folder_id:folderId||null,agent_id:agentId||null,file_ids,message:prompt})});
+        if (estimate.credits>=5&&!confirm(`Esta operação consumirá aproximadamente ${estimate.credits} créditos. Deseja continuar?`)){setBusy(false);return}
+      }
       setText("");
       setFile(null);
       setMessages((v) => [
@@ -295,8 +299,8 @@ export default function Workspace() {
   }
   const favorites = conversations.filter((c) => c.favorite);
   const unfiled = conversations.filter((c) => !c.folder_id && !c.favorite);
-  const used = data?.usage.tokens || 0,
-    total = data?.limits.tokens || 1,
+  const used = Math.max(0,(data?.limits.credits||0)-(data?.company.credit_balance||0)),
+    total = data?.limits.credits || 1,
     left = Math.max(0, total - used),
     pct = Math.min(100, (used / total) * 100);
   const composer = (
@@ -862,9 +866,9 @@ function PlanPanel({
   left: number;
   pct: number;
 }) {
-  async function upgrade() {
+  async function upgrade(plan="professional") {
     try {
-      const x = await call("/billing/checkout?plan=professional", {
+      const x = await call(`/billing/checkout?plan=${plan}`, {
         method: "POST",
       });
       location.href = x.url;
@@ -887,7 +891,7 @@ function PlanPanel({
             </p>
           </div>
           <button
-            onClick={upgrade}
+            onClick={() => upgrade("professional")}
             className="rounded-xl bg-zinc-950 px-5 py-3 text-sm font-medium text-white"
           >
             Fazer upgrade
@@ -895,7 +899,7 @@ function PlanPanel({
         </div>
         <div className="mt-8">
           <div className="flex justify-between text-sm">
-            <span>{used.toLocaleString("pt-BR")} tokens usados</span>
+            <span>{used.toLocaleString("pt-BR")} créditos usados</span>
             <span className="text-zinc-500">
               {left.toLocaleString("pt-BR")} restantes
             </span>
@@ -907,10 +911,12 @@ function PlanPanel({
             />
           </div>
           <p className="mt-3 text-xs text-zinc-400">
-            Limite do plano:{" "}
-            {(data?.limits.tokens || 0).toLocaleString("pt-BR")} tokens
+            Orçamento de API: R$ {(data?.company.api_budget_used||0).toFixed(2).replace(".",",")} de R$ {(data?.limits.api_budget||0).toFixed(2).replace(".",",")}
           </p>
         </div>
+      </div>
+      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        {[["starter","Essencial","R$ 29,90","700 créditos"],["professional","Profissional","R$ 59,90","1.600 créditos"],["premium","Premium","R$ 99,90","3.000 créditos"],["enterprise","Empresa","R$ 199,90","7.000 créditos"]].map(([id,name,price,credits])=><div key={id} className="rounded-2xl border p-5"><p className="font-semibold">{name}</p><p className="mt-1 text-2xl font-semibold">{price}<span className="text-xs font-normal text-zinc-500">/mês</span></p><p className="mt-2 text-sm text-zinc-500">{credits}</p><button onClick={()=>upgrade(id)} className="mt-4 w-full rounded-xl bg-zinc-950 py-2.5 text-sm text-white">Escolher plano</button></div>)}
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-4">
         {[

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     stripe_starter_price_id: str = ""
     stripe_professional_price_id: str = ""
+    stripe_premium_price_id: str = ""
     stripe_enterprise_price_id: str = ""
     smtp_host: str = ""
     smtp_port: int = 587

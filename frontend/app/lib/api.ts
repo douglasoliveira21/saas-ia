@@ -54,7 +54,7 @@ export async function call(path: string, options: RequestInit = {}) {
   }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Erro inesperado" }));
-    throw new Error(error.detail || "Erro inesperado");
+    throw new Error((typeof error.detail === "object" ? error.detail?.message : error.detail) || "Erro inesperado");
   }
   return response.status === 204 ? null : response.json();
 }

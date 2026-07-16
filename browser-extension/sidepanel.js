@@ -21,7 +21,7 @@ async function refresh(){
 async function api(path,options={}){
   let tokens=await stored();let response=await fetch(API+path,{...options,headers:{"Content-Type":"application/json",Authorization:`Bearer ${tokens.access_token||""}`,...options.headers}});
   if(response.status===401){const token=await refresh();if(!token)throw new Error("Sessão expirada");response=await fetch(API+path,{...options,headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`,...options.headers}})}
-  if(!response.ok)throw new Error((await response.json().catch(()=>({}))).detail||"Erro na API");return response.status===204?null:response.json();
+  if(!response.ok){const error=await response.json().catch(()=>({}));throw new Error((typeof error.detail==="object"?error.detail?.message:error.detail)||"Erro na API")}return response.status===204?null:response.json();
 }
 async function activeTab(){
   const allowed=await chrome.permissions.request({origins:["http://*/*","https://*/*"]});

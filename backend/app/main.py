@@ -1,4 +1,4 @@
-import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib
+import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib, math
 from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
@@ -25,10 +25,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from bs4 import BeautifulSoup
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample, MicrosoftConnection
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, UserSettingsIn
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, UserSettingsIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -36,7 +36,36 @@ app=FastAPI(title=settings.app_name,version="1.0.0",docs_url="/docs")
 logger=logging.getLogger("solvitsoft.ai")
 app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url,"http://localhost:3000"],allow_origin_regex=r"^(chrome-extension|moz-extension|extension)://.*$",allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 API="/api/v1"
-PLANS={"starter":{"tokens":500000,"users":5,"agents":3},"professional":{"tokens":3000000,"users":25,"agents":15},"enterprise":{"tokens":20000000,"users":250,"agents":100}}
+PLANS={
+    "free":{"price":0,"credits":100,"api_budget":.50,"users":1,"agents":3,"tokens":500000},
+    "starter":{"price":29.90,"credits":700,"api_budget":4.00,"users":5,"agents":3,"tokens":1500000},
+    "professional":{"price":59.90,"credits":1600,"api_budget":9.00,"users":15,"agents":15,"tokens":4000000},
+    "premium":{"price":99.90,"credits":3000,"api_budget":17.00,"users":30,"agents":30,"tokens":8000000},
+    "enterprise":{"price":199.90,"credits":7000,"api_budget":38.00,"users":100,"agents":100,"tokens":20000000},
+}
+def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
+    text=message.lower(); tokens=max(1,len(message)//4)+1800; images=[x for x in attached if x.mime_type.startswith("image/")]; audio=[x for x in attached if x.mime_type.startswith("audio/")]; documents=[x for x in attached if x not in images+audio]
+    if re.search(r"\b(crie|gere|faça|produza)\b.{0,60}\b(imagem|foto|ilustração|arte|logo|banner)\b",text) and not attached: return 20,.10,"image_generation"
+    if images: return 4*len(images),.02*len(images),"vision"
+    if audio:
+        minutes=sum(max(1,math.ceil(x.size/(1024*1024))) for x in audio); noisy=bool(re.search(r"\b(ruído|ruido|barulho)\b",text)); return max(3,minutes*(3 if noisy else 1)),minutes*(.012 if noisy else .006),"audio"
+    if documents:
+        volume=0
+        for item in documents:
+            if item.mime_type=="application/pdf":
+                try: volume+=max(1,math.ceil(len(PdfReader(item.path).pages)/10))
+                except Exception: volume+=1
+            else: volume+=max(1,math.ceil((len(item.extracted_text or "")/4)/10000))
+        return 3+volume,.012+.006*volume,"document"
+    if re.search(r"\b(raciocínio|matemática|lógica|otimização|calcule|demonstre)\b",text): return 4+max(0,math.ceil((tokens-3000)/3000)),.02+tokens*.000002,"reasoning"
+    if re.search(r"\b(código|programação|python|javascript|typescript|react|sql|docker|debug)\b",text): return 3+max(0,math.ceil((tokens-5000)/5000)),.012+tokens*.0000015,"code"
+    if re.search(r"\b(pesquise|internet|notícia|hoje|agora|preço|cotação|clima|placar)\b",text): return 2+max(0,math.ceil((tokens-5000)/5000)),.01+tokens*.000001,"web_search"
+    return 1+max(0,math.ceil((tokens-5000)/5000)),.003+tokens*.000001,"text"
+def reserve_company_usage(db:Session,user:User,message:str,attached:list[File])->tuple[int,float,str]:
+    company=db.scalar(select(Company).where(Company.id==user.company_id).with_for_update()); credits,cost,route=estimate_charge(message,attached); plan=PLANS.get(company.plan,PLANS["free"])
+    if company.credit_balance<credits: raise HTTPException(402,{"code":"credits_exhausted","message":"Seus créditos terminaram. Faça upgrade para continuar.","required":credits,"remaining":company.credit_balance})
+    if company.api_budget_used+cost>plan["api_budget"]: raise HTTPException(402,{"code":"budget_exhausted","message":"O orçamento de API do plano foi atingido. Faça upgrade para continuar.","estimated_cost":cost,"remaining":round(plan["api_budget"]-company.api_budget_used,4)})
+    company.credit_balance-=credits; company.api_budget_used+=cost; return credits,cost,route
 SPECIALIST_AGENTS=[
     ("Marketing","Estratégia, marca, conteúdo, mídia, SEO e crescimento","Você é um diretor de Marketing sênior. Domina posicionamento, branding, pesquisa de mercado, ICP, jornada, copywriting, conteúdo, SEO, mídia paga, CRM, analytics, funis, CAC, LTV e experimentação. Entregue estratégias executáveis, métricas, cronogramas e exemplos alinhados ao negócio."),
     ("Recursos Humanos","Cultura, talentos, desempenho e desenvolvimento","Você é um executivo de Recursos Humanos especialista em recrutamento, seleção por competências, employer branding, cultura, clima, desempenho, cargos e salários, treinamento, liderança, people analytics e retenção. Produza políticas e planos práticos, inclusivos e mensuráveis."),
@@ -522,6 +551,7 @@ async def ai_answer(data:ChatIn,user,db):
     attached=[]
     if data.file_ids:
         attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)]
+    charged_credits,estimated_api_cost,estimated_route=reserve_company_usage(db,user,data.message,attached)
     db.add(Message(conversation_id=conv.id,role="user",content=data.message)); db.flush()
     memory_pattern=re.compile(r"\b(meu nome é|pode me chamar de|eu gosto de|eu prefiro|prefiro|não gosto de|eu trabalho com|minha empresa (?:é|se chama)|sempre responda|quero que você)\b[^.!?\n]{2,220}",re.IGNORECASE)
     for match in memory_pattern.finditer(data.message) if user.memory_enabled else []:
@@ -571,7 +601,7 @@ async def ai_answer(data:ChatIn,user,db):
             async with httpx.AsyncClient(timeout=180) as client:
                 res=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
             if res.is_error:
-                logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); image_data=None; answer=f"Não consegui gerar a imagem agora (DeepInfra respondeu {res.status_code}). Verifique o modelo de imagem e o saldo da conta."
+                logger.error("DeepInfra image generation failed status=%s body=%s",res.status_code,res.text[:1000]); raise HTTPException(502,"Falha técnica ao gerar imagem. Nenhum crédito foi consumido.")
             else:
                 generated=res.json()["data"][0]; raw=base64.b64decode(generated["b64_json"]); image_data=f"data:image/png;base64,{generated['b64_json']}"; answer="Imagem criada conforme sua solicitação."
                 image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}.png"; image_path.write_bytes(raw)
@@ -674,12 +704,38 @@ async def ai_answer(data:ChatIn,user,db):
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
     route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "code" if model==settings.code_ai_model else "reasoning" if model==settings.reasoning_ai_model else "text"
-    db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008)))
+    db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=estimated_api_cost,credits=charged_credits))
     if user.training_opt_in and not attached: db.add(TrainingSample(company_id=user.company_id,user_id=user.id,prompt=anonymize_training_text(data.message),response=anonymize_training_text(answer),model=model,category=route,consented_at=datetime.now(timezone.utc)))
     db.commit()
     return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"image":None,"usage":{"input":inp,"output":out}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)
+@app.post(API+"/usage/estimate")
+def usage_estimate(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)):
+    attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)] if data.file_ids else []; credits,cost,route=estimate_charge(data.message,attached); company=db.get(Company,user.company_id); plan=PLANS.get(company.plan,PLANS["free"])
+    return {"credits":credits,"estimated_api_cost":round(cost,4),"route":route,"credit_balance":company.credit_balance,"api_budget_remaining":round(plan["api_budget"]-company.api_budget_used,4)}
+@app.post(API+"/anonymous/chat")
+async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends(get_db)):
+    device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest(); ip=request.headers.get("x-forwarded-for",(request.client.host if request.client else "" )).split(",")[0].strip(); ip_hash=hashlib.sha256((ip+settings.secret_key).encode()).hexdigest()
+    allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash).with_for_update())
+    if not allowance:
+        if (db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3: raise HTTPException(402,{"code":"login_required","message":"O limite gratuito deste local foi utilizado. Crie uma conta para continuar."})
+        allowance=AnonymousAllowance(device_hash=device_hash,ip_hash=ip_hash,credit_balance=100,api_budget_used=0); db.add(allowance); db.flush()
+    credits,cost,route=estimate_charge(data.message,[])
+    if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
+    allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
+    if not settings.deepinfra_api_key: raise HTTPException(503,"IA não configurada")
+    if route=="image_generation":
+        async with httpx.AsyncClient(timeout=180) as client: response=await client.post(f"{settings.deepinfra_base_url}/images/generations",json={"model":settings.image_ai_model,"prompt":data.message,"size":"1024x1024","n":1,"response_format":"b64_json"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+        response.raise_for_status(); image="data:image/png;base64,"+response.json()["data"][0]["b64_json"]; answer="Imagem criada conforme sua solicitação."
+    else:
+        model={"code":settings.code_ai_model,"reasoning":settings.reasoning_ai_model}.get(route,settings.default_ai_model); system=OFFICIAL_PROMPT
+        if route=="web_search" and settings.tavily_api_key:
+            async with httpx.AsyncClient(timeout=30) as client: search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"search_depth":"basic","max_results":5})
+            if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
+        async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+        response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
+    db.commit(); return {"message":answer,"image":image,"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
 @app.websocket("/ws/chat")
 async def chat_stream(ws:WebSocket):
     token=ws.query_params.get("token","")
@@ -701,23 +757,29 @@ async def chat_stream(ws:WebSocket):
 @app.post(API+"/billing/checkout")
 def checkout(plan:str,user=Depends(require_roles("owner")),db:Session=Depends(get_db)):
     if not settings.stripe_secret_key: raise HTTPException(503,"Stripe ainda não configurado")
-    prices={"starter":settings.stripe_starter_price_id,"professional":settings.stripe_professional_price_id,"enterprise":settings.stripe_enterprise_price_id}; price=prices.get(plan)
+    prices={"starter":settings.stripe_starter_price_id,"professional":settings.stripe_professional_price_id,"premium":settings.stripe_premium_price_id,"enterprise":settings.stripe_enterprise_price_id}; price=prices.get(plan)
     if not price: raise HTTPException(400,"Plano ou Price ID inválido")
     stripe.api_key=settings.stripe_secret_key; company=db.get(Company,user.company_id)
-    session=stripe.checkout.Session.create(mode="subscription",line_items=[{"price":price,"quantity":1}],success_url=settings.frontend_url+"/dashboard?billing=success",cancel_url=settings.frontend_url+"/planos",customer=company.stripe_customer_id or None,customer_email=None if company.stripe_customer_id else company.email,metadata={"company_id":company.id,"plan":plan}); return {"url":session.url}
+    metadata={"company_id":company.id,"plan":plan}; session=stripe.checkout.Session.create(mode="subscription",line_items=[{"price":price,"quantity":1}],success_url=settings.frontend_url+"/dashboard?billing=success",cancel_url=settings.frontend_url+"/dashboard",customer=company.stripe_customer_id or None,customer_email=None if company.stripe_customer_id else company.email,metadata=metadata,subscription_data={"metadata":metadata}); return {"url":session.url}
 @app.post(API+"/billing/webhook")
 async def webhook(request:Request,db:Session=Depends(get_db)):
     payload=await request.body(); sig=request.headers.get("stripe-signature","")
     try: event=stripe.Webhook.construct_event(payload,sig,settings.stripe_webhook_secret)
     except Exception: raise HTTPException(400,"Webhook inválido")
     obj=event["data"]["object"]; cid=(obj.get("metadata") or {}).get("company_id")
+    if event["type"]=="invoice.paid" and obj.get("subscription"):
+        company=db.scalar(select(Company).where(Company.stripe_subscription_id==obj.get("subscription")))
+        if company:
+            limits=PLANS.get(company.plan,PLANS["free"]); company.credit_balance=limits["credits"]; company.api_budget_used=0; db.commit()
     if cid:
         company=db.get(Company,cid)
         if company:
             company.stripe_customer_id=obj.get("customer") or company.stripe_customer_id; company.stripe_subscription_id=obj.get("subscription") or obj.get("id") or company.stripe_subscription_id
             if event["type"]=="customer.subscription.deleted": company.status="canceled"
             elif event["type"]=="invoice.payment_failed": company.status="past_due"
-            else: company.status="active"; company.plan=(obj.get("metadata") or {}).get("plan",company.plan)
+            else:
+                company.status="active"; new_plan=(obj.get("metadata") or {}).get("plan",company.plan)
+                if new_plan!=company.plan: company.plan=new_plan; company.credit_balance=PLANS.get(new_plan,PLANS["free"])["credits"]; company.api_budget_used=0
             db.commit()
     return {"received":True}
 @app.get(API+"/admin/companies")

@@ -74,7 +74,26 @@ def trusted_bfl_url(value:str)->bool:
     hostname=(parsed.hostname or "").lower()
     return parsed.scheme=="https" and (hostname=="bfl.ai" or hostname.endswith(".bfl.ai"))
 
+def image_b64_from_data_url(value:str)->str:
+    prefix,encoded=value.split(",",1)
+    if not prefix.lower().startswith("data:image/") or ";base64" not in prefix.lower(): raise ValueError("Invalid image data URL")
+    raw=base64.b64decode(encoded,validate=True)
+    if not raw or len(raw)>20*1024*1024: raise ValueError("Invalid image payload size")
+    return encoded
+
 async def generate_image_b64(prompt:str)->tuple[str,str]:
+    qwen_native=bool(settings.deepinfra_api_key and settings.image_ai_model.startswith("Qwen/Qwen-Image"))
+    if qwen_native:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120,connect=10)) as client:
+                response=await client.post(f"{settings.deepinfra_native_url.rstrip('/')}/{settings.image_ai_model}",json={"prompt":prompt,"size":"1280*1280","num_images":1,"prompt_extend":True,"watermark":False},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            if response.is_success:
+                result=response.json()
+                if any(result.get("nsfw_content_detected",[])): raise HTTPException(422,"O provedor recusou este pedido por suas regras de conteúdo. Reformule a descrição; nenhum crédito foi consumido.")
+                return image_b64_from_data_url(result["images"][0]),settings.image_ai_model
+            logger.error("DeepInfra Qwen image generation failed status=%s body=%s",response.status_code,response.text[:1000])
+        except HTTPException: raise
+        except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError): logger.exception("DeepInfra Qwen Image Max failed; using image fallback")
     if settings.bfl_api_key:
         headers={"accept":"application/json","x-key":settings.bfl_api_key,"Content-Type":"application/json"}
         try:
@@ -101,7 +120,7 @@ async def generate_image_b64(prompt:str)->tuple[str,str]:
         except HTTPException: raise
         except (httpx.HTTPError,KeyError,TypeError,ValueError): logger.exception("BFL FLUX.2 max generation failed; using DeepInfra fallback")
         else: logger.warning("BFL FLUX.2 max did not complete; using DeepInfra fallback")
-    models=list(dict.fromkeys([settings.image_ai_model,settings.image_fallback_ai_model]))
+    models=list(dict.fromkeys(([settings.image_fallback_ai_model] if qwen_native else [settings.image_ai_model,settings.image_fallback_ai_model]))) if settings.deepinfra_api_key else []
     last_status=None
     for model in models:
         try:
@@ -713,7 +732,7 @@ async def ai_answer(data:ChatIn,user,db):
         return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","image":None,"usage":{"input":inp,"output":out}}
     image_intent=is_image_generation_request(data.message)
     if image_intent and not attached:
-        if not settings.deepinfra_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
+        if not settings.deepinfra_api_key and not settings.bfl_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
         else:
             encoded,image_model=await generate_image_b64(data.message); raw=base64.b64decode(encoded); image_data=True; answer="Imagem criada conforme sua solicitação."
             suffix=".jpg" if raw.startswith(b"\xff\xd8\xff") else ".png"
@@ -840,7 +859,7 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
         credits,cost,route=estimate_charge(data.message,[])
         if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
         allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
-        if not settings.deepinfra_api_key: raise HTTPException(503,"IA não configurada")
+        if not settings.deepinfra_api_key and not settings.bfl_api_key: raise HTTPException(503,"IA não configurada")
         if route=="image_generation":
             encoded,_=await generate_image_b64(data.message); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
         else:
@@ -882,7 +901,7 @@ async def chat_stream(ws:WebSocket):
         if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
         while True:
             payload=await ws.receive_json()
-            if is_image_generation_request(str(payload.get("message",""))): await ws.send_json({"type":"status","content":"Gerando imagem em qualidade máxima com FLUX.2 max..." if settings.bfl_api_key else "Gerando imagem..."})
+            if is_image_generation_request(str(payload.get("message",""))): await ws.send_json({"type":"status","content":"Gerando imagem em alta qualidade com Qwen Image Max..." if settings.deepinfra_api_key and settings.image_ai_model=="Qwen/Qwen-Image-Max" else "Gerando imagem..."})
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})
             answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db))
             control_task=asyncio.create_task(ws.receive_json())

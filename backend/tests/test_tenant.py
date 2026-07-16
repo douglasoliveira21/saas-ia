@@ -4,13 +4,14 @@ def test_health_contract():
 
 
 def test_image_provider_errors_explain_billing_and_prompt_failures():
-    from app.main import image_provider_error, trusted_bfl_url
+    from app.main import image_b64_from_data_url, image_provider_error, trusted_bfl_url
     assert "saldo do provedor" in image_provider_error(402)[1]
     assert "reformular" in image_provider_error(400)[1]
     assert "temporariamente indisponível" in image_provider_error(500)[1]
     assert trusted_bfl_url("https://api.bfl.ai/v1/get_result?id=123")
     assert trusted_bfl_url("https://delivery.us.bfl.ai/image.jpg")
     assert not trusted_bfl_url("https://example.com/image.jpg")
+    assert image_b64_from_data_url("data:image/png;base64,aW1hZ2U=")=="aW1hZ2U="
 
 
 def test_web_sources_are_guaranteed_without_duplicating_existing_links():

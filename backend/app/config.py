@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     code_ai_model: str = "Qwen/Qwen3-Coder-480B-A35B-Instruct-Turbo"
     vision_ai_model: str = "Qwen/Qwen3-VL-235B-A22B-Instruct"
     reasoning_ai_model: str = "deepseek-ai/DeepSeek-R1-0528"
-    image_ai_model: str = "black-forest-labs/FLUX-2-pro"
+    image_ai_model: str = "Qwen/Qwen-Image-Max"
     image_fallback_ai_model: str = "black-forest-labs/FLUX-1-schnell"
     image_edit_ai_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
     audio_ai_model: str = "mistralai/Voxtral-Mini-3B-2507"

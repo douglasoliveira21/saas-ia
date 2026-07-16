@@ -12,11 +12,15 @@ async function api(path,options={}){
   if(response.status===401){const token=await refresh();if(!token)throw new Error("Sessão expirada");response=await fetch(API+path,{...options,headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`,...options.headers}})}
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).detail||"Erro na API");return response.status===204?null:response.json();
 }
-async function activeContext(){
+async function activeTab(){
   const allowed=await chrome.permissions.request({origins:["http://*/*","https://*/*"]});
   if(!allowed)throw new Error("Autorize o acesso aos sites para que a extensão possa ler a página.");
   const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
   if(!tab?.id)throw new Error("Nenhuma aba ativa foi encontrada.");
+  return tab;
+}
+async function activeContext(){
+  const tab=await activeTab();
   try {
     const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({title:document.title,url:location.href,selection:String(getSelection()||""),text:(document.body?.innerText||"").slice(0,40000)})});
     return result.result;
@@ -32,5 +36,7 @@ async function screenshotFile(){
 }
 async function boot(){const tokens=await stored();$("login").hidden=!!tokens.access_token;$("app").hidden=!tokens.access_token}
 $("loginButton").onclick=async()=>{try{const response=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("email").value,password:$("password").value})});if(!response.ok)throw new Error((await response.json()).detail||"Login inválido");await chrome.storage.local.set(await response.json());boot()}catch(error){$("loginError").textContent=error.message}};
-$("send").onclick=async()=>{try{$("status").textContent="Lendo a página e consultando a IA...";let context={};if($("pageContext").checked)context=await activeContext();const file_ids=$("screenshot").checked?[await screenshotFile()]:[];const message=`Página atual: ${context.title||""}\nURL: ${context.url||""}\nTexto selecionado: ${context.selection||""}\nConteúdo visível:\n${context.text||""}\n\nSolicitação: ${$("prompt").value}`;const result=await api("/chat",{method:"POST",body:JSON.stringify({message,file_ids})});$("answer").textContent=result.message;$("status").textContent="Concluído."}catch(error){$("status").textContent=error.message}};
+$("send").onclick=async()=>{try{$("status").textContent="Lendo a página e consultando a IA...";let context={};if($("pageContext").checked)context=await activeContext();const file_ids=$("screenshot").checked?[await screenshotFile()]:[];const message=`[BROWSER_CONTEXT]\nPágina atual: ${context.title||""}\nURL: ${context.url||""}\nTexto selecionado: ${context.selection||""}\nConteúdo visível:\n${context.text||""}\n\nSolicitação: ${$("prompt").value}`;const result=await api("/chat",{method:"POST",body:JSON.stringify({message,file_ids})});$("answer").textContent=result.message;$("status").textContent="Concluído."}catch(error){$("status").textContent=error.message}};
+$("insert").onclick=async()=>{try{const value=$("answer").textContent;if(!value)throw new Error("Ainda não existe uma resposta para inserir.");const tab=await activeTab();const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},args:[value],func:(text)=>{const element=document.activeElement;if(!element)return false;if(element instanceof HTMLInputElement||element instanceof HTMLTextAreaElement){const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(element),"value")?.set;setter?.call(element,text);element.dispatchEvent(new Event("input",{bubbles:true}));element.dispatchEvent(new Event("change",{bubbles:true}));return true}if(element.isContentEditable){element.textContent=text;element.dispatchEvent(new InputEvent("input",{bubbles:true,inputType:"insertText",data:text}));return true}return false}});if(!result.result)throw new Error("Clique primeiro no campo da página onde deseja inserir.");$("status").textContent="Resposta inserida no campo selecionado."}catch(error){$("status").textContent=error.message}};
+$("copy").onclick=async()=>{const value=$("answer").textContent;if(value){await navigator.clipboard.writeText(value);$("status").textContent="Resposta copiada."}};
 $("logout").onclick=async()=>{await chrome.storage.local.clear();boot()};boot();

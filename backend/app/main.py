@@ -508,7 +508,9 @@ async def ai_answer(data:ChatIn,user,db):
     conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,folder_id=data.folder_id,title=data.message[:70])
     if not data.conversation_id: db.add(conv); db.flush()
     agent_id=data.agent_id or conv.agent_id
+    browser_context=data.message.startswith("[BROWSER_CONTEXT]")
     agent=tenant_get(db,Agent,agent_id,user) if agent_id else None; model=settings.default_ai_model; prompt=OFFICIAL_PROMPT+(f"\n\nEspecialização ativa: {agent.system_prompt}" if agent else "")
+    if browser_context: prompt+="\n\nVocê está operando dentro da extensão oficial SolvitSoft para navegador. O conteúdo da página, URL, seleção e eventual captura já foram fornecidos pelo sistema. Nunca diga que não tem acesso à página. Analise o contexto recebido. Se o usuário pedir para preencher ou inserir algo, produza exatamente o conteúdo pronto para inserção e explique brevemente onde aplicá-lo; a extensão possui um botão para inserir sua resposta no campo selecionado."
     if user.preferred_name: prompt+=f"\n\nChame o usuário de {user.preferred_name}."
     if user.occupation: prompt+=f"\n\nAdapte exemplos, linguagem e recomendações à área profissional: {user.occupation}."
     if user.custom_instructions: prompt+=f"\n\nInstruções permanentes fornecidas pelo usuário:\n{user.custom_instructions}"
@@ -636,7 +638,7 @@ async def ai_answer(data:ChatIn,user,db):
         if re.search(code_terms,content,re.IGNORECASE): model=settings.code_ai_model
         elif re.search(reasoning_terms,content,re.IGNORECASE): model=settings.reasoning_ai_model
     web_terms=r"\b(pesquise|pesquisar|procure na (?:internet|web)|busque na (?:internet|web)|notícia|noticias|hoje|agora|atual|atualmente|recente|últim[oa]s?|preço|cotação|clima|previsão do tempo|placar|resultado|jogo|partida|campeonato|copa do mundo|quanto (?:tá|ta|está|esta)|versão mais recente|documentação oficial|legislação|lei vigente|diário oficial|presidente atual|ceo atual|link oficial|fonte oficial)\b"
-    web_search=bool(settings.tavily_api_key and not attached and re.search(web_terms,content,re.IGNORECASE))
+    web_search=bool(settings.tavily_api_key and not attached and not browser_context and re.search(web_terms,content,re.IGNORECASE))
     web_results=[]
     if web_search:
         now_br=datetime.now(ZoneInfo("America/Sao_Paulo")); sports=bool(re.search(r"\b(placar|resultado|jogo|partida|campeonato|copa|futebol|quanto (?:tá|ta|está|esta))\b",content,re.IGNORECASE))

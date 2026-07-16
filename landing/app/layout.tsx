@@ -5,8 +5,17 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://solvitsoft.com.br"),
-  title: "SolvitSoft IA | Inteligência Artificial para toda a sua empresa",
-  description: "Mais de 100 agentes de IA especializados para automatizar processos, criar, pesquisar e transformar a produtividade da sua empresa.",
+  applicationName: "SolvitSoft IA",
+  title: {
+    default: "SolvitSoft IA — Inteligência Artificial para Empresas",
+    template: "%s | SolvitSoft IA",
+  },
+  description: "Plataforma empresarial com mais de 100 agentes de inteligência artificial para automatizar processos, analisar documentos, criar conteúdos e aumentar a produtividade.",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [{ url: "/icon", type: "image/png" }],
+    apple: [{ url: "/apple-icon", type: "image/png" }],
+  },
   keywords: ["inteligência artificial para empresas", "agentes de IA", "automação empresarial", "IA Microsoft 365", "SolvitSoft"],
   alternates: { canonical: "/" },
   openGraph: {

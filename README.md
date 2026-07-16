@@ -2,6 +2,8 @@
 
 Plataforma multiempresa com frontend Next.js, API FastAPI, PostgreSQL/pgvector, Redis, Celery, DeepInfra e Stripe. Cada registro operacional leva `company_id` e todas as consultas autenticadas aplicam o tenant do JWT.
 
+O repositório também contém uma landing page pública independente na pasta `landing`, preparada para o domínio `solvitsoft.com.br`. O painel autenticado continua separado em `app.solvitsoft.com.br`.
+
 ## O que está implementado
 
 - Cadastro de empresa e owner, login JWT e rotação de refresh token
@@ -26,6 +28,18 @@ Plataforma multiempresa com frontend Next.js, API FastAPI, PostgreSQL/pgvector, 
 Sem `DEEPINFRA_API_KEY`, o chat retorna uma mensagem de configuração — todo o restante funciona normalmente.
 
 ## Implantação completa no EasyPanel
+
+### Landing page pública
+
+Crie um serviço de aplicativo separado apontando para este mesmo repositório e para a branch `main`. Configure:
+
+- Diretório raiz: `/landing`
+- Dockerfile: `/landing/Dockerfile`
+- Porta interna: `3000`
+- Domínio: `solvitsoft.com.br`
+- Variáveis de ambiente: nenhuma obrigatória
+
+O botão principal da landing page encaminha o visitante para `https://app.solvitsoft.com.br/`.
 
 ### 1. Preparar domínio e projeto
 

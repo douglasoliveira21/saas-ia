@@ -23,6 +23,8 @@ import {
   MessageSquare,
   MoreHorizontal,
   Paperclip,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Send,
   Settings2,
@@ -95,6 +97,7 @@ export default function Workspace() {
   const [profile, setProfile] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [mobile, setMobile] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [folderName, setFolderName] = useState("");
   const load = useCallback(
     () =>
@@ -140,6 +143,7 @@ export default function Workspace() {
     setLoading("Abrindo conversa...");
     try {
       setSelected(c.id);
+      setCollapsed(false);
       setFolderId(c.folder_id || "");
       setAgentId(c.agent_id || "");
       setMobile(false);
@@ -169,6 +173,7 @@ export default function Workspace() {
     setAgentId("");
     setFile(null);
     setMobile(false);
+    setCollapsed(true);
   }
   async function patch(id: string, body: object) {
     setLoading("Salvando alteração...");
@@ -212,6 +217,7 @@ export default function Workspace() {
     e.preventDefault();
     if (!text.trim() || busy) return;
     setBusy(true);
+    setCollapsed(false);
     setError("");
     const prompt = text;
     const aid = crypto.randomUUID();
@@ -310,15 +316,16 @@ export default function Workspace() {
         <Menu size={20} />
       </button>
       <aside
-        className={`${mobile ? "flex" : "hidden"} fixed inset-y-0 left-0 z-40 w-72 flex-col border-r border-zinc-200 bg-zinc-50 p-3 lg:static lg:flex`}
+        className={`${mobile ? "flex" : "hidden"} ${collapsed ? "sidebar-collapsed" : ""} fixed inset-y-0 left-0 z-40 w-72 flex-col border-r border-zinc-200 bg-zinc-50 p-3 transition-[width] duration-200 lg:static lg:flex`}
       >
         <div className="flex items-center justify-between px-2 py-2">
           <div className="flex items-center gap-2 font-semibold">
             <span className="grid h-8 w-8 place-items-center rounded-lg bg-zinc-950 text-white">
               <Sparkles size={15} />
             </span>
-            SolvitSoft IA
+            <span className="sidebar-detail">SolvitSoft IA</span>
           </div>
+          <button onClick={() => setCollapsed(!collapsed)} className="hidden rounded-lg p-1.5 hover:bg-zinc-200 lg:block" title={collapsed?"Expandir menu":"Recolher menu"}>{collapsed?<PanelLeftOpen size={18}/>:<PanelLeftClose size={18}/>}</button>
           <button onClick={() => setMobile(false)} className="lg:hidden">
             <X />
           </button>
@@ -328,16 +335,16 @@ export default function Workspace() {
           className="mt-3 flex items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white py-3 text-sm font-medium shadow-sm"
         >
           <Plus size={16} />
-          Novo bate-papo
+          <span className="sidebar-detail">Novo bate-papo</span>
         </button>
         <button
           onClick={() => setSettings("general")}
           className="mt-2 flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm text-zinc-600 hover:bg-zinc-200"
         >
           <Settings2 size={16} />
-          Personalizar
+          <span className="sidebar-detail">Personalizar</span>
         </button>
-        <form onSubmit={addFolder} className="mt-3 flex gap-2">
+        <form onSubmit={addFolder} className="sidebar-detail mt-3 flex gap-2">
           <input
             value={folderName}
             onChange={(e) => setFolderName(e.target.value)}
@@ -348,7 +355,7 @@ export default function Workspace() {
             <FolderPlus size={15} />
           </button>
         </form>
-        <div className="scroll mt-4 flex-1 space-y-5 overflow-y-auto">
+        <div className="sidebar-detail scroll mt-4 flex-1 space-y-5 overflow-y-auto">
           <DropSection
             title="Favoritos"
             icon={<Star size={13} />}
@@ -385,22 +392,22 @@ export default function Workspace() {
         </div>
         <div className="relative border-t border-zinc-200 pt-3">
           <button
-            onClick={() => setProfile(!profile)}
+            onClick={() => collapsed ? setCollapsed(false) : setProfile(!profile)}
             className="flex w-full items-center gap-3 rounded-xl p-2 text-left hover:bg-zinc-200"
           >
             <span className="grid h-9 w-9 place-items-center rounded-full bg-zinc-900 text-sm font-semibold text-white">
               {me?.name?.[0]?.toUpperCase() || "U"}
             </span>
-            <div className="min-w-0 flex-1">
+            <div className="sidebar-detail min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{me?.name}</p>
               <p className="truncate text-xs text-zinc-500">
                 Plano {data?.company.plan}
               </p>
             </div>
-            <MoreHorizontal size={17} />
+            <span className="sidebar-detail"><MoreHorizontal size={17} /></span>
           </button>
           {profile && (
-            <div className="absolute bottom-14 left-0 right-0 rounded-xl border border-zinc-200 bg-white p-2 shadow-xl">
+            <div className="sidebar-detail absolute bottom-14 left-0 right-0 rounded-xl border border-zinc-200 bg-white p-2 shadow-xl">
               <button
                 onClick={() => { setProfile(false); setSettings("general"); }}
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-zinc-50"

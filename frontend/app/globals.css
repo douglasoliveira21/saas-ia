@@ -135,3 +135,27 @@ textarea,
 select {
   font-weight: 500;
 }
+
+@media (min-width: 1024px) {
+  .sidebar-collapsed {
+    width: 4.75rem;
+  }
+
+  .sidebar-collapsed .sidebar-detail {
+    display: none;
+  }
+
+  .sidebar-collapsed > div:first-child {
+    flex-direction: column;
+    gap: 0.65rem;
+  }
+
+  .sidebar-collapsed > div:last-child {
+    margin-top: auto;
+  }
+
+  .sidebar-collapsed > button {
+    padding-left: 0;
+    padding-right: 0;
+  }
+}

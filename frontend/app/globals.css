@@ -4,7 +4,7 @@
 
 :root {
   color-scheme: light;
-  --font-ai: ui-rounded, "SF Pro Rounded", "Aptos", "Segoe UI Variable Text",
+  --font-ai: "Nunito Sans Variable", ui-rounded, "SF Pro Rounded", "Aptos", "Segoe UI Variable Text",
     "SF Pro Text", Inter, ui-sans-serif, system-ui, -apple-system,
     BlinkMacSystemFont, "Segoe UI", sans-serif;
   --claude-canvas: #faf9f5;
@@ -21,7 +21,7 @@
 
 html {
   font-family: var(--font-ai);
-  font-size: 16.5px;
+  font-size: 18px;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -35,6 +35,7 @@ body {
   font-family: inherit;
   letter-spacing: -0.003em;
   line-height: 1.55;
+  font-weight: 450;
 }
 
 h1,
@@ -110,4 +111,27 @@ input,
 textarea,
 select {
   color: var(--claude-text);
+}
+
+/* Escala tipográfica mais confortável e perceptivelmente maior. */
+.text-sm {
+  font-size: 0.92rem;
+  line-height: 1.55rem;
+}
+
+.text-xs {
+  font-size: 0.8rem;
+  line-height: 1.25rem;
+}
+
+.text-\[11px\] {
+  font-size: 0.73rem;
+  line-height: 1.05rem;
+}
+
+button,
+input,
+textarea,
+select {
+  font-weight: 500;
 }

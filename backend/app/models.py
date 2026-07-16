@@ -58,3 +58,7 @@ class TrainingSample(Base):
     __tablename__="training_samples"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True)
     prompt: Mapped[str]=mapped_column(Text); response: Mapped[str]=mapped_column(Text); model: Mapped[str]=mapped_column(String(160)); category: Mapped[str]=mapped_column(String(40),default="chat"); consented_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class MicrosoftConnection(Base):
+    __tablename__="microsoft_connections"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),unique=True,index=True); tenant_id: Mapped[str|None]=mapped_column(String(80)); microsoft_user_id: Mapped[str|None]=mapped_column(String(120)); email: Mapped[str|None]=mapped_column(String(255))
+    access_token_encrypted: Mapped[str]=mapped_column(Text); refresh_token_encrypted: Mapped[str]=mapped_column(Text); expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True)); scopes: Mapped[str]=mapped_column(Text); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)

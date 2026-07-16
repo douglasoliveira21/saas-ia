@@ -10,6 +10,7 @@ import {
   Bot,
   BrainCircuit,
   ChevronDown,
+  Cloud,
   CreditCard,
   Download,
   FileText,
@@ -74,7 +75,7 @@ type Me = {
   memory_enabled?: boolean;
   company: { id: string; name: string } | null;
 };
-type Setting = "general" | "account" | "privacy" | "billing" | "memory";
+type Setting = "general" | "account" | "privacy" | "microsoft" | "billing" | "memory";
 const input =
   "w-full rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm outline-none focus:border-zinc-600";
 export default function Workspace() {
@@ -735,6 +736,7 @@ function SettingsModal({
     ["general", "Geral", UserRound],
     ["account", "Conta", Monitor],
     ["privacy", "Privacidade", Shield],
+    ["microsoft", "Microsoft 365", Cloud],
     ["billing", "Cobrança", CreditCard],
     ["memory", "Memória", BrainCircuit],
   ];
@@ -785,6 +787,7 @@ function SettingsModal({
           {tab === "general" && <GeneralSettings me={me} reload={reload} />}
           {tab === "account" && <AccountSettings me={me} />}
           {tab === "privacy" && <PrivacySettings me={me} reload={reload} />}
+          {tab === "microsoft" && <MicrosoftSettings />}
           {tab === "billing" && (
             <PlanPanel data={data} used={used} left={left} pct={pct} />
           )}
@@ -839,6 +842,14 @@ function PrivacySettings({me,reload}:{me:Me|null;reload:()=>void}) {
 function MemorySettings({me,reload}:{me:Me|null;reload:()=>void}) {
   const [saving,setSaving]=useState(false); async function toggle(value:boolean){setSaving(true);await call("/me",{method:"PATCH",body:JSON.stringify({memory_enabled:value})});await reload();setSaving(false)}
   return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Memória</h2><div className="mt-7 flex gap-5 rounded-2xl border p-5"><div className="flex-1"><h3 className="font-medium">Gerar memória do histórico de conversas</h3><p className="mt-1 text-sm leading-6 text-zinc-500">Permitir que o SolvitSoft se lembre do contexto relevante dos seus chats. Esta configuração controla a memória tanto para chats quanto para projetos.</p></div><Toggle checked={me?.memory_enabled!==false} onChange={toggle} disabled={saving}/></div><div className="mt-6"><MemoryPanel/></div></div>
+}
+function MicrosoftSettings() {
+  const [state,setState]=useState<{connected:boolean;email?:string}>({connected:false}); const [loading,setLoading]=useState(true);
+  const load=()=>call("/microsoft/status").then(setState).finally(()=>setLoading(false));
+  useEffect(()=>{load()},[]);
+  async function connect(){const data=await call("/microsoft/connect");location.href=data.url}
+  async function disconnect(){if(!confirm("Desconectar a conta Microsoft 365?"))return;await call("/microsoft",{method:"DELETE"});load()}
+  return <div className="mx-auto max-w-2xl"><h2 className="text-3xl font-semibold">Microsoft 365</h2><p className="mt-2 text-sm text-zinc-500">Conecte Word, Excel, Outlook, PowerPoint, OneDrive, calendário e contatos à sua IA SolvitSoft.</p><div className="mt-7 rounded-2xl border p-6">{loading?<PanelLoading/>:<><div className="flex items-center gap-3"><Cloud/><div><p className="font-semibold">{state.connected?"Conta conectada":"Nenhuma conta conectada"}</p>{state.email&&<p className="text-sm text-zinc-500">{state.email}</p>}</div></div><button onClick={state.connected?disconnect:connect} className={`mt-6 rounded-xl px-5 py-3 text-sm font-medium ${state.connected?"border":"bg-zinc-950 text-white"}`}>{state.connected?"Desconectar Microsoft 365":"Entrar com Microsoft 365"}</button></>}</div></div>
 }
 function PlanPanel({
   data,

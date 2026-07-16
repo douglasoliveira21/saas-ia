@@ -1,10 +1,12 @@
-import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata
+import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib
+from urllib.parse import urlencode
 from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
+from cryptography.fernet import Fernet
 from sqlalchemy import select, func, or_, delete
 from sqlalchemy.orm import Session
 import httpx, stripe
@@ -23,7 +25,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from bs4 import BeautifulSoup
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample, MicrosoftConnection
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
 from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, UserSettingsIn
@@ -48,6 +50,23 @@ SPECIALIST_AGENTS=[
     ("Tecnologia e TI","Software, infraestrutura, dados e segurança","Você é um CTO e arquiteto de software sênior. Domina produto digital, programação moderna, APIs, cloud, DevOps, bancos de dados, observabilidade, segurança, IA e governança. Proponha soluções seguras, escaláveis, testáveis e com trade-offs explícitos."),
     ("Gestão Empresarial","Estratégia, processos e execução","Você é um consultor de gestão empresarial sênior. Domina planejamento estratégico, OKRs, processos, indicadores, governança, operações, projetos, qualidade e transformação organizacional. Converta problemas em diagnóstico, prioridades, responsáveis, prazos e métricas."),
 ]
+MS_SCOPES="openid profile email offline_access User.Read Files.ReadWrite Mail.ReadWrite Mail.Send Calendars.ReadWrite Contacts.ReadWrite"
+def token_cipher(): return Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest()))
+def encrypt_token(value:str)->str: return token_cipher().encrypt(value.encode()).decode()
+def decrypt_token(value:str)->str: return token_cipher().decrypt(value.encode()).decode()
+async def microsoft_access_token(db:Session,user_id:str)->str:
+    item=db.scalar(select(MicrosoftConnection).where(MicrosoftConnection.user_id==user_id))
+    if not item: raise HTTPException(409,"Conecte sua conta Microsoft 365")
+    if item.expires_at.replace(tzinfo=timezone.utc)>datetime.now(timezone.utc)+timedelta(minutes=2): return decrypt_token(item.access_token_encrypted)
+    endpoint=f"https://login.microsoftonline.com/{settings.microsoft_tenant_id}/oauth2/v2.0/token"
+    async with httpx.AsyncClient(timeout=30) as client: response=await client.post(endpoint,data={"client_id":settings.microsoft_client_id,"client_secret":settings.microsoft_client_secret,"grant_type":"refresh_token","refresh_token":decrypt_token(item.refresh_token_encrypted),"scope":MS_SCOPES})
+    if response.is_error: raise HTTPException(401,"A conexão Microsoft expirou; conecte novamente")
+    data=response.json(); item.access_token_encrypted=encrypt_token(data["access_token"]); item.refresh_token_encrypted=encrypt_token(data.get("refresh_token",decrypt_token(item.refresh_token_encrypted))); item.expires_at=datetime.now(timezone.utc)+timedelta(seconds=data.get("expires_in",3600)); item.updated_at=datetime.now(timezone.utc); db.commit(); return data["access_token"]
+async def graph_request(db:Session,user_id:str,method:str,path:str,body=None):
+    token=await microsoft_access_token(db,user_id)
+    async with httpx.AsyncClient(timeout=60) as client: response=await client.request(method,"https://graph.microsoft.com/v1.0"+path,headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},json=body)
+    if response.is_error: raise HTTPException(response.status_code,response.json().get("error",{}).get("message","Erro no Microsoft Graph"))
+    return response.json() if response.content else {"ok":True}
 
 def ensure_specialist_agents(db:Session,company_id:str,user_id:str)->None:
     existing=set(db.scalars(select(Agent.name).where(Agent.company_id==company_id)).all())
@@ -308,6 +327,44 @@ async def update_avatar(file:UploadFile=Upload(...),user=Depends(current_user),d
 def get_avatar(user=Depends(current_user)):
     if not user.avatar or not pathlib.Path(user.avatar).is_file(): raise HTTPException(404,"Avatar não encontrado")
     return FileResponse(user.avatar)
+@app.get(API+"/microsoft/status")
+def microsoft_status(user=Depends(current_user),db:Session=Depends(get_db)):
+    item=db.scalar(select(MicrosoftConnection).where(MicrosoftConnection.user_id==user.id)); return {"connected":bool(item),"email":item.email if item else None,"scopes":item.scopes.split() if item else []}
+@app.get(API+"/microsoft/connect")
+def microsoft_connect(user=Depends(current_user)):
+    if not settings.microsoft_client_id or not settings.microsoft_client_secret: raise HTTPException(503,"Integração Microsoft ainda não configurada")
+    state=jwt.encode({"sub":user.id,"purpose":"microsoft_oauth","exp":datetime.now(timezone.utc)+timedelta(minutes=10)},settings.secret_key,algorithm="HS256")
+    params={"client_id":settings.microsoft_client_id,"response_type":"code","redirect_uri":settings.microsoft_redirect_uri,"response_mode":"query","scope":MS_SCOPES,"state":state,"prompt":"select_account"}
+    return {"url":f"https://login.microsoftonline.com/{settings.microsoft_tenant_id}/oauth2/v2.0/authorize?{urlencode(params)}"}
+@app.get(API+"/microsoft/callback")
+async def microsoft_callback(code:str,state:str,db:Session=Depends(get_db)):
+    try: payload=jwt.decode(state,settings.secret_key,algorithms=["HS256"]); user_id=payload["sub"]; assert payload.get("purpose")=="microsoft_oauth"
+    except Exception: raise HTTPException(400,"Estado OAuth inválido")
+    endpoint=f"https://login.microsoftonline.com/{settings.microsoft_tenant_id}/oauth2/v2.0/token"
+    async with httpx.AsyncClient(timeout=30) as client: token_response=await client.post(endpoint,data={"client_id":settings.microsoft_client_id,"client_secret":settings.microsoft_client_secret,"grant_type":"authorization_code","code":code,"redirect_uri":settings.microsoft_redirect_uri,"scope":MS_SCOPES})
+    if token_response.is_error: raise HTTPException(400,"A Microsoft recusou a autorização")
+    data=token_response.json()
+    async with httpx.AsyncClient(timeout=30) as client: profile=(await client.get("https://graph.microsoft.com/v1.0/me",headers={"Authorization":f"Bearer {data['access_token']}"})).json()
+    item=db.scalar(select(MicrosoftConnection).where(MicrosoftConnection.user_id==user_id)) or MicrosoftConnection(user_id=user_id,access_token_encrypted="",refresh_token_encrypted="",expires_at=datetime.now(timezone.utc),scopes="")
+    item.tenant_id=profile.get("tenantId"); item.microsoft_user_id=profile.get("id"); item.email=profile.get("mail") or profile.get("userPrincipalName"); item.access_token_encrypted=encrypt_token(data["access_token"]); item.refresh_token_encrypted=encrypt_token(data["refresh_token"]); item.expires_at=datetime.now(timezone.utc)+timedelta(seconds=data.get("expires_in",3600)); item.scopes=data.get("scope",MS_SCOPES); item.updated_at=datetime.now(timezone.utc); db.add(item); db.commit()
+    return RedirectResponse(settings.frontend_url+"/dashboard?microsoft=connected")
+@app.delete(API+"/microsoft",status_code=204)
+def microsoft_disconnect(user=Depends(current_user),db:Session=Depends(get_db)):
+    db.execute(delete(MicrosoftConnection).where(MicrosoftConnection.user_id==user.id)); db.commit()
+@app.get(API+"/microsoft/files")
+async def microsoft_files(user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"GET","/me/drive/root/children?$top=100")
+@app.get(API+"/microsoft/mail")
+async def microsoft_mail(user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"GET","/me/messages?$top=50&$select=id,subject,from,receivedDateTime,bodyPreview,isRead")
+@app.post(API+"/microsoft/mail/drafts")
+async def microsoft_draft(body:dict,user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"POST","/me/messages",{"subject":body.get("subject",""),"body":{"contentType":"HTML","content":body.get("content","")},"toRecipients":[{"emailAddress":{"address":x}} for x in body.get("to",[])]})
+@app.get(API+"/microsoft/calendar")
+async def microsoft_calendar(user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"GET","/me/events?$top=50")
+@app.get(API+"/microsoft/contacts")
+async def microsoft_contacts(user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"GET","/me/contacts?$top=100")
+@app.get(API+"/microsoft/excel/{item_id}/range")
+async def microsoft_excel_range(item_id:str,address:str,user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"GET",f"/me/drive/items/{item_id}/workbook/worksheets/Sheet1/range(address='{address}')")
+@app.patch(API+"/microsoft/excel/{item_id}/range")
+async def microsoft_excel_update(item_id:str,address:str,body:dict,user=Depends(current_user),db:Session=Depends(get_db)): return await graph_request(db,user.id,"PATCH",f"/me/drive/items/{item_id}/workbook/worksheets/Sheet1/range(address='{address}')",body)
 @app.get(API+"/account/devices")
 def account_devices(user=Depends(current_user),db:Session=Depends(get_db)):
     now=datetime.now(timezone.utc); items=db.scalars(select(RefreshToken).where(RefreshToken.user_id==user.id,RefreshToken.revoked==False,RefreshToken.expires_at>now).order_by(RefreshToken.last_used_at.desc())).all()

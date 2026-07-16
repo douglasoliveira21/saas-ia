@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     deepinfra_native_url: str = "https://api.deepinfra.com/v1/inference"
     tavily_api_key: str = ""
     tavily_base_url: str = "https://api.tavily.com"
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_tenant_id: str = "common"
+    microsoft_redirect_uri: str = "http://localhost:8000/api/v1/microsoft/callback"
     embedding_ai_model: str = "BAAI/bge-m3"
     embedding_dimensions: int = 1024
     rag_top_k: int = 8

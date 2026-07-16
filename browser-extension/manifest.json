@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "SolvitSoft IA",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Use a IA SolvitSoft com o conteúdo da página atual.",
   "minimum_chrome_version": "114",
   "permissions": ["activeTab", "scripting", "storage", "sidePanel"],
   "host_permissions": ["https://api.solvitsoft.com.br/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "service-worker.js" },
   "action": { "default_title": "Abrir SolvitSoft IA" },
   "side_panel": { "default_path": "sidepanel.html" }

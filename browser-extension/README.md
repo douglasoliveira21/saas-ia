@@ -13,6 +13,7 @@
 ## Permissões e privacidade
 
 - `activeTab`: acesso temporário apenas à aba em que o usuário acionou a extensão.
+- No primeiro uso, o navegador solicita autorização opcional para sites HTTP/HTTPS, necessária para o painel continuar funcionando após navegar entre páginas.
 - `scripting`: extrai título, URL, seleção e texto visível sob demanda.
 - `sidePanel`: exibe o painel lateral.
 - `storage`: guarda a sessão SolvitSoft na área privada da extensão.

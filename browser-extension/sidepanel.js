@@ -13,8 +13,16 @@ async function api(path,options={}){
   if(!response.ok)throw new Error((await response.json().catch(()=>({}))).detail||"Erro na API");return response.status===204?null:response.json();
 }
 async function activeContext(){
-  const [tab]=await chrome.tabs.query({active:true,currentWindow:true});if(!tab?.id||!/^(https?|file):/.test(tab.url||""))throw new Error("Esta página não permite leitura pela extensão.");
-  const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({title:document.title,url:location.href,selection:String(getSelection()||""),text:(document.body?.innerText||"").slice(0,40000)})});return result.result;
+  const allowed=await chrome.permissions.request({origins:["http://*/*","https://*/*"]});
+  if(!allowed)throw new Error("Autorize o acesso aos sites para que a extensão possa ler a página.");
+  const [tab]=await chrome.tabs.query({active:true,currentWindow:true});
+  if(!tab?.id)throw new Error("Nenhuma aba ativa foi encontrada.");
+  try {
+    const [result]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({title:document.title,url:location.href,selection:String(getSelection()||""),text:(document.body?.innerText||"").slice(0,40000)})});
+    return result.result;
+  } catch {
+    throw new Error("Esta página é protegida pelo navegador. Abra um site comum com endereço http ou https.");
+  }
 }
 async function screenshotFile(){
   const result=await chrome.runtime.sendMessage({type:"capture"});if(result.error)throw new Error(result.error);

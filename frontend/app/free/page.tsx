@@ -61,6 +61,10 @@ export default function FreeChat(){
     let id=localStorage.getItem("solvitsoft_device_id");
     if(!id){id=crypto.randomUUID()+"-"+crypto.randomUUID();localStorage.setItem("solvitsoft_device_id",id)}
     setDevice(id);
+    fetch(API+"/anonymous/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({device_id:id})})
+      .then(async response=>{if(!response.ok)throw new Error();return response.json()})
+      .then(status=>{setCredits(status.credit_balance);setBlocked(status.blocked);if(status.blocked)setError(status.message||"Seus créditos gratuitos terminaram. Entre ou crie uma conta para continuar.")})
+      .catch(()=>setError("Não foi possível consultar o saldo gratuito. Atualize a página e tente novamente."));
     loadHistory().then(items=>{setChats(items);if(items[0])setSelected(items[0].id)}).catch(()=>setError("Não foi possível carregar o histórico deste navegador."));
   },[]);
 
@@ -99,6 +103,7 @@ export default function FreeChat(){
       if(response.status===402){setBlocked(true);throw new Error(data.detail?.message||"Limite gratuito atingido")}
       if(!response.ok)throw new Error(typeof data.detail==="string"?data.detail:"Erro inesperado");
       setCredits(data.credit_balance);
+      if(data.credit_balance<=0||data.api_budget_used>=data.api_budget_limit){setBlocked(true);setError("Seu limite gratuito terminou. Entre ou crie uma conta para continuar.")}
       updateLocal({...pending,messages:[...pending.messages,{role:"assistant",content:data.message,image:data.image}],updatedAt:Date.now()});
     }catch(e){
       if((e as Error).name==="AbortError"){
@@ -128,7 +133,7 @@ export default function FreeChat(){
           ))}
           {!chats.length&&<p className="px-3 py-4 text-xs leading-5 text-zinc-400">Suas conversas gratuitas aparecerão aqui e ficarão salvas somente neste dispositivo.</p>}
         </div>
-        <div className="border-t pt-3 text-xs text-zinc-500"><p>{credits} de 100 créditos restantes</p><p className="mt-1">Plano gratuito neste navegador</p></div>
+        <div className="border-t pt-3 text-xs text-zinc-500"><p className={blocked?"font-semibold text-red-600":""}>{blocked?"Limite gratuito encerrado":`${credits} de 100 créditos restantes`}</p><p className="mt-1">{blocked?"Entre ou crie uma conta para continuar":"Plano gratuito neste navegador"}</p></div>
       </aside>
       <section className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-16 items-center justify-between border-b px-4">

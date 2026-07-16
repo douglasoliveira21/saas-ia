@@ -31,7 +31,7 @@ from app.database import get_db, SessionLocal
 from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, UserSettingsIn, AdminUserUpdate
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, AnonymousStatusIn, UserSettingsIn, AdminUserUpdate
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -787,6 +787,17 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
         async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
         response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
     db.commit(); return {"message":answer,"image":image,"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
+@app.post(API+"/anonymous/status")
+def anonymous_status(data:AnonymousStatusIn,request:Request,db:Session=Depends(get_db)):
+    device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest()
+    allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash))
+    if allowance:
+        blocked=allowance.credit_balance<=0 or allowance.api_budget_used>=.50
+        return {"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50,"blocked":blocked,"message":"Seus créditos gratuitos terminaram. Entre ou crie uma conta para continuar." if blocked else None}
+    ip=request.headers.get("x-forwarded-for",(request.client.host if request.client else "")).split(",")[0].strip()
+    ip_hash=hashlib.sha256((ip+settings.secret_key).encode()).hexdigest()
+    exhausted=(db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3
+    return {"credit_balance":0 if exhausted else 100,"api_budget_used":.50 if exhausted else 0,"api_budget_limit":.50,"blocked":exhausted,"message":"O limite gratuito deste local foi utilizado. Entre ou crie uma conta para continuar." if exhausted else None}
 @app.websocket("/ws/chat")
 async def chat_stream(ws:WebSocket):
     token=ws.query_params.get("token","")

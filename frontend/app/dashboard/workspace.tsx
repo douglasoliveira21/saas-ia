@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { API, call, getAccessToken } from "../lib/api";
 import ReactMarkdown from "react-markdown";
@@ -33,6 +33,7 @@ import {
   Shield,
   Sparkles,
   Star,
+  Square,
   Trash2,
   Upload,
   Users,
@@ -93,6 +94,7 @@ export default function Workspace() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const socketRef = useRef<WebSocket | null>(null);
   const [loading, setLoading] = useState("Carregando seu workspace...");
   const [error, setError] = useState("");
   const [settings, setSettings] = useState<Setting | null>(null);
@@ -258,6 +260,7 @@ export default function Workspace() {
         API.replace(/^http/, "ws").replace(/\/api\/v1\/?$/, "") +
           `/ws/chat?token=${encodeURIComponent(token)}`,
       );
+      socketRef.current = socket;
       socket.onopen = () =>
         socket.send(
           JSON.stringify({
@@ -287,16 +290,36 @@ export default function Workspace() {
           socket.close();
           load();
         }
+        if (p.type === "stopped") {
+          setMessages((v) => v.map((m) => m.id === aid ? { ...m, content: m.content || "Resposta interrompida.", status: undefined } : m));
+          socket.close();
+        }
       };
       socket.onerror = () => {
         setError("Falha na conexão em tempo real.");
         setBusy(false);
       };
-      socket.onclose = () => setBusy(false);
+      socket.onclose = () => {
+        socketRef.current = null;
+        setBusy(false);
+      };
     } catch (e) {
       setError((e as Error).message);
       setBusy(false);
     }
+  }
+  function stopGeneration() {
+    const socket=socketRef.current;
+    if (!socket) return;
+    if (socket.readyState===WebSocket.OPEN) socket.send(JSON.stringify({type:"stop"}));
+    if (socket.readyState===WebSocket.CONNECTING) {
+      socket.close();
+      socketRef.current=null;
+      setBusy(false);
+      setMessages((v)=>v.map((m,index)=>index===v.length-1&&m.role==="assistant"&&!m.content?{...m,content:"Resposta interrompida.",status:undefined}:m));
+      return;
+    }
+    setMessages((v)=>v.map((m,index)=>index===v.length-1&&m.role==="assistant"&&!m.content?{...m,status:"Interrompendo..."}:m));
   }
   const favorites = conversations.filter((c) => c.favorite);
   const unfiled = conversations.filter((c) => !c.folder_id && !c.favorite);
@@ -315,9 +338,15 @@ export default function Workspace() {
           <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.pptx,.txt,.csv,.md,.html,.png,.jpg,.jpeg,.webp,.mp3,.flac" onChange={(e) => setFile(e.target.files?.[0] || null)} />
         </label>
         <textarea rows={1} value={text} onChange={(e) => setText(e.target.value)} placeholder="Envie uma mensagem..." className="min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none" />
-        <button disabled={busy || !text.trim()} className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300">
-          {busy ? <Spinner className="border-zinc-500 border-t-white" /> : <Send size={17} />}
-        </button>
+        {busy ? (
+          <button type="button" onClick={stopGeneration} title="Interromper resposta" aria-label="Interromper resposta" className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white">
+            <Square size={15} fill="currentColor" />
+          </button>
+        ) : (
+          <button disabled={!text.trim()} className="grid h-10 w-10 place-items-center rounded-full bg-zinc-950 text-white disabled:bg-zinc-300">
+            <Send size={17} />
+          </button>
+        )}
       </div>
       {file && <div className="mt-2 flex w-fit gap-2 rounded-lg bg-zinc-100 px-3 py-2 text-xs"><FileText size={14}/>{file.name}<button type="button" onClick={() => setFile(null)}><X size={13}/></button></div>}
     </form>

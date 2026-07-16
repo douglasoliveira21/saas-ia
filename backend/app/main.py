@@ -1,4 +1,5 @@
 import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib, math
+from contextlib import suppress
 import smtplib
 from email.message import EmailMessage
 from urllib.parse import urlencode
@@ -791,19 +792,37 @@ async def chat_stream(ws:WebSocket):
     token=ws.query_params.get("token","")
     try: token_payload=jwt.decode(token,settings.secret_key,algorithms=["HS256"]); user_id=token_payload["sub"]
     except (JWTError,KeyError): await ws.close(code=4401); return
-    await ws.accept(); db=SessionLocal()
+    await ws.accept(); db=SessionLocal(); answer_task=None
     try:
         user=db.get(User,user_id)
         if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
         while True:
             payload=await ws.receive_json()
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})
-            result=await ai_answer(ChatIn.model_validate(payload),user,db)
+            answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db))
+            control_task=asyncio.create_task(ws.receive_json())
+            finished,_=await asyncio.wait({answer_task,control_task},return_when=asyncio.FIRST_COMPLETED)
+            if control_task in finished:
+                control=control_task.result()
+                if control.get("type")=="stop":
+                    answer_task.cancel()
+                    with suppress(asyncio.CancelledError): await answer_task
+                    db.rollback()
+                    await ws.send_json({"type":"stopped"})
+                    continue
+            control_task.cancel()
+            with suppress(asyncio.CancelledError): await control_task
+            result=await answer_task
             words=result["message"].split(" ")
             for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
             await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"image":result.get("image"),"usage":result["usage"]})
     except WebSocketDisconnect: pass
-    finally: db.close()
+    finally:
+        if answer_task and not answer_task.done():
+            answer_task.cancel()
+            with suppress(asyncio.CancelledError): await answer_task
+            db.rollback()
+        db.close()
 @app.post(API+"/billing/checkout")
 def checkout(plan:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
     if not settings.stripe_secret_key: raise HTTPException(503,"Stripe ainda não configurado")

@@ -94,6 +94,7 @@ export default function Workspace() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeModule, setActiveModule] = useState<"images"|"audio"|"text_documents"|null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const [loading, setLoading] = useState("Carregando seu workspace...");
   const [error, setError] = useState("");
@@ -161,6 +162,7 @@ export default function Workspace() {
     setFile(null);
     setMobile(false);
     setCollapsed(true);
+    setActiveModule(null);
   }
   async function patch(id: string, body: object) {
     setLoading("Salvando alteração...");
@@ -217,6 +219,7 @@ export default function Workspace() {
     setCollapsed(false);
     setError("");
     const prompt = text;
+    setActiveModule(null);
     const aid = crypto.randomUUID();
     try {
       let file_ids: string[] = [];
@@ -256,8 +259,10 @@ export default function Workspace() {
         );
       socket.onmessage = async (e) => {
         const p = JSON.parse(e.data);
-        if (p.type === "status")
+        if (p.type === "status") {
+          if (p.module) setActiveModule(p.module);
           setMessages((v) => v.map((m) => m.id === aid ? { ...m, status: p.content } : m));
+        }
         if (p.type === "delta")
           setMessages((v) =>
             v.map((m) =>
@@ -265,6 +270,7 @@ export default function Workspace() {
             ),
           );
         if (p.type === "done") {
+          if (p.module) setActiveModule(p.module);
           setSelected(p.conversation_id);
           if (p.image) {
             try {
@@ -491,7 +497,7 @@ export default function Workspace() {
                 "Novo bate-papo"}
             </p>
             <p className="text-[11px] text-zinc-400">
-              {agents.find((agent)=>agent.id===agentId)?.description || "IA automática para texto, documentos e imagens"}
+              {activeModule==="images"?"Módulo de imagens":activeModule==="audio"?"Módulo de áudio":activeModule==="text_documents"?"Módulo de texto e documentos":agents.find((agent)=>agent.id===agentId)?.description || "Seleção automática entre texto e documentos, imagens e áudio"}
             </p>
           </div>
           <div className="flex items-center gap-2">

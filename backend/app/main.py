@@ -62,6 +62,10 @@ def is_image_generation_request(message:str)->bool:
     actions=r"(?:crie|criar|cria|gere|gerar|gera|faca|fazer|faz|produza|produzir|desenhe|desenhar|quero|gostaria|preciso)"
     images=r"(?:imagem|iamgem|foto|fotografia|ilustracao|arte|logo|banner|desenho|wallpaper|capa|icone|thumbnail)"
     return bool(re.search(rf"\b{actions}\b.{{0,100}}\b{images}\b|\b{images}\b.{{0,100}}\b{actions}\b",text))
+def public_module(route:str)->str:
+    if route in {"image_generation","vision"}: return "images"
+    if route=="audio": return "audio"
+    return "text_documents"
 
 def image_provider_error(status_code:int|None)->tuple[int,str]:
     if status_code in {401,403}: return 503,"A geração de imagens está indisponível porque a credencial do provedor precisa ser verificada. Nenhum crédito foi consumido."
@@ -749,7 +753,7 @@ async def ai_answer(data:ChatIn,user,db):
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
         if generated.mime_type in INDEXABLE_MIMES: queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"file_generation","image":None,"usage":{"input":inp,"output":out}}
+        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"file_generation","module":"text_documents","image":None,"usage":{"input":inp,"output":out}}
     spreadsheet_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|monte)\b.{0,80}\b(planilha|excel|xlsx)\b|\b(planilha|excel|xlsx)\b.{0,80}\b(crie|criar|gere|gerar|faça|produza|monte)\b",data.message.lower()))
     if spreadsheet_intent and not attached:
         if not settings.deepinfra_api_key: raise HTTPException(503,"Configure DEEPINFRA_API_KEY para gerar planilhas")
@@ -767,7 +771,7 @@ async def ai_answer(data:ChatIn,user,db):
         answer=f"Pronto — criei a planilha **{safe_name}** conforme solicitado.\n\n[Baixar {safe_name}](/api/v1/files/{generated.id}/download)"
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit(); queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","image":None,"usage":{"input":inp,"output":out}}
+        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","module":"text_documents","image":None,"usage":{"input":inp,"output":out}}
     image_intent=is_image_generation_request(data.message)
     if image_intent and not attached:
         if not settings.deepinfra_api_key and not settings.bfl_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
@@ -778,7 +782,7 @@ async def ai_answer(data:ChatIn,user,db):
         assistant_message=Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)
         db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=image_model if image_data else settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
         image_url=f"/messages/{assistant_message.id}/image" if image_data else None
-        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","image":image_url,"usage":{"input":0,"output":0}}
+        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","module":"images","image":image_url,"usage":{"input":0,"output":0}}
     rag_hits=[]
     if not attached and settings.deepinfra_api_key:
         ready_query=select(File.id).outerjoin(Folder,Folder.id==File.folder_id).where(File.company_id==user.company_id,File.index_status=="ready")
@@ -799,7 +803,7 @@ async def ai_answer(data:ChatIn,user,db):
     document_mimes={"application/pdf","text/plain","text/markdown","text/csv","text/html","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","application/vnd.openxmlformats-officedocument.presentationml.presentation"}
     documents=[x for x in attached if x.mime_type in document_mimes]
     if documents:
-        model=settings.document_ai_model
+        model=settings.default_ai_model
         sections=[]
         for item in documents:
             text=item.extracted_text or ""
@@ -843,11 +847,6 @@ async def ai_answer(data:ChatIn,user,db):
             api_messages[0]["content"]+="\n\nTranscrição integral do áudio anexado:\n"+"\n".join(transcripts)
             if meeting_intent: api_messages[0]["content"]+="\n\nA separação confiável de participantes e a análise acústica de tom exigem MISTRAL_API_KEY. Não invente falantes ou tons; informe essa limitação."
     content=data.message.lower()
-    code_terms=r"\b(código|codigo|programa(?:ção|cao)|python|javascript|typescript|react|vue|angular|node|java|c#|php|sql|api|docker|kubernetes|debug|refator|teste unitário|algoritmo em)\b"
-    reasoning_terms=r"\b(matemática|matematica|lógica|logica|planejamento|otimiza(?:ção|cao)|demonstre|calcule|probabilidade|análise profunda|analise profunda)\b"
-    if not images and not documents:
-        if re.search(code_terms,content,re.IGNORECASE): model=settings.code_ai_model
-        elif re.search(reasoning_terms,content,re.IGNORECASE): model=settings.reasoning_ai_model
     web_terms=r"\b(pesquise|pesquisar|procure na (?:internet|web)|busque na (?:internet|web)|notícia|noticias|hoje|agora|atual|atualmente|recente|últim[oa]s?|preço|cotação|clima|previsão do tempo|placar|resultado|jogo|partida|campeonato|copa do mundo|quanto (?:tá|ta|está|esta)|versão mais recente|documentação oficial|legislação|lei vigente|diário oficial|presidente atual|ceo atual|link oficial|fonte oficial)\b"
     web_search=bool(settings.tavily_api_key and not attached and not browser_context and re.search(web_terms,content,re.IGNORECASE))
     web_results=[]
@@ -884,11 +883,11 @@ async def ai_answer(data:ChatIn,user,db):
         if rag_hits: answer=ensure_rag_sources(answer,rag_hits)
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
-    route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "code" if model==settings.code_ai_model else "reasoning" if model==settings.reasoning_ai_model else "text"
+    route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "text"
     db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=estimated_api_cost,credits=charged_credits))
     if user.training_opt_in and not attached: db.add(TrainingSample(company_id=user.company_id,user_id=user.id,prompt=anonymize_training_text(data.message),response=anonymize_training_text(answer),model=model,category=route,consented_at=datetime.now(timezone.utc)))
     db.commit()
-    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"image":None,"usage":{"input":inp,"output":out}}
+    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"module":public_module(route),"image":None,"usage":{"input":inp,"output":out}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)
 @app.post(API+"/usage/estimate")
@@ -910,13 +909,13 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
         if route=="image_generation":
             encoded,_=await generate_image_b64(data.message); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
         else:
-            model={"code":settings.code_ai_model,"reasoning":settings.reasoning_ai_model}.get(route,settings.default_ai_model); system=OFFICIAL_PROMPT
+            model=settings.default_ai_model; system=OFFICIAL_PROMPT
             if route=="web_search" and settings.tavily_api_key:
                 async with httpx.AsyncClient(timeout=30) as client: search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"search_depth":"basic","max_results":5})
                 if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
             async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
             response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
-        db.commit(); return {"message":answer,"image":image,"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
+        db.commit(); return {"message":answer,"image":image,"module":public_module(route),"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
     except HTTPException:
         db.rollback()
         raise
@@ -948,9 +947,18 @@ async def chat_stream(ws:WebSocket):
         if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
         while True:
             payload=await ws.receive_json()
-            if is_meeting_analysis_request(str(payload.get("message",""))) and payload.get("file_ids"): await ws.send_json({"type":"status","content":"Separando participantes e analisando os tons de voz da reunião..."})
-            if is_image_generation_request(str(payload.get("message",""))): await ws.send_json({"type":"status","content":"Gerando imagem em alta qualidade com Qwen Image Max..." if settings.deepinfra_api_key and settings.image_ai_model=="Qwen/Qwen-Image-Max" else "Gerando imagem..."})
-            if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",str(payload.get("message","")).lower()): await ws.send_json({"type":"status","content":"Pesquisando informações atualizadas na internet..."})
+            request_text=str(payload.get("message",""))
+            request_files=[user_file(db,file_id,user) for file_id in dict.fromkeys(payload.get("file_ids") or [])]
+            has_audio=any(item.mime_type in AUDIO_MIMES for item in request_files)
+            has_images=any(item.mime_type.startswith("image/") for item in request_files)
+            if has_audio:
+                status="Módulo de áudio: separando participantes e analisando a reunião..." if is_meeting_analysis_request(request_text) else "Módulo de áudio: transcrevendo e analisando..."
+            elif has_images or is_image_generation_request(request_text):
+                status="Módulo de imagens: criando sua imagem..." if is_image_generation_request(request_text) and not request_files else "Módulo de imagens: analisando o conteúdo visual..."
+            else:
+                status="Módulo de texto e documentos: preparando a resposta..."
+            await ws.send_json({"type":"status","content":status,"module":"audio" if has_audio else "images" if has_images or is_image_generation_request(request_text) else "text_documents"})
+            if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",request_text.lower()): await ws.send_json({"type":"status","content":"Módulo de texto e documentos: pesquisando informações atualizadas...","module":"text_documents"})
             answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db))
             control_task=asyncio.create_task(ws.receive_json())
             finished,_=await asyncio.wait({answer_task,control_task},return_when=asyncio.FIRST_COMPLETED)
@@ -967,7 +975,7 @@ async def chat_stream(ws:WebSocket):
             result=await answer_task
             words=result["message"].split(" ")
             for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
-            await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"image":result.get("image"),"usage":result["usage"]})
+            await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"module":result.get("module"),"image":result.get("image"),"usage":result["usage"]})
     except WebSocketDisconnect: pass
     except HTTPException as exc:
         db.rollback()

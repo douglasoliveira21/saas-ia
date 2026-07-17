@@ -20,5 +20,4 @@ reportlab==4.4.3
 pgvector==0.4.1
 beautifulsoup4==4.13.4
 email-validator==2.2.0
-slowapi==0.1.9
 cryptography==45.0.5

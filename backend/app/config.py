@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
     superadmin_email: str = "admin@example.com"
-    superadmin_password: str = "ChangeMe123!"
+    superadmin_password: str = ""
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 @lru_cache
 def get_settings(): return Settings()

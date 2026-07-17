@@ -50,6 +50,17 @@ class AgentFile(Base):
     __tablename__="agent_files"; agent_id: Mapped[str]=mapped_column(ForeignKey("agents.id",ondelete="CASCADE"),primary_key=True); file_id: Mapped[str]=mapped_column(ForeignKey("files.id",ondelete="CASCADE"),primary_key=True)
 class UsageLog(Base):
     __tablename__="usage_logs"; id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); company_id: Mapped[str]=mapped_column(ForeignKey("companies.id",ondelete="CASCADE"),index=True); user_id: Mapped[str]=mapped_column(ForeignKey("users.id"),index=True); model: Mapped[str]=mapped_column(String(160)); input_tokens: Mapped[int]=mapped_column(Integer,default=0); output_tokens: Mapped[int]=mapped_column(Integer,default=0); cost: Mapped[float]=mapped_column(Float,default=0); credits: Mapped[int]=mapped_column(Integer,default=0); audio_minutes: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class AIUsageLedger(Base):
+    __tablename__="ai_usage_ledger"; __table_args__=(Index("ix_ai_usage_ledger_company_created","company_id","created_at"),)
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid)
+    company_id: Mapped[str|None]=mapped_column(ForeignKey("companies.id",ondelete="SET NULL"),index=True)
+    user_id: Mapped[str|None]=mapped_column(ForeignKey("users.id",ondelete="SET NULL"),index=True)
+    anonymous_device_hash: Mapped[str|None]=mapped_column(String(64),index=True)
+    provider: Mapped[str]=mapped_column(String(40)); model: Mapped[str]=mapped_column(String(160)); provider_request_id: Mapped[str|None]=mapped_column(String(160),index=True)
+    operation: Mapped[str]=mapped_column(String(40)); estimated_cost: Mapped[float]=mapped_column(Float); actual_cost: Mapped[float|None]=mapped_column(Float)
+    reserved_credits: Mapped[int]=mapped_column(Integer); final_credits: Mapped[int]=mapped_column(Integer)
+    status: Mapped[str]=mapped_column(String(30)); latency_ms: Mapped[int]=mapped_column(Integer); error_code: Mapped[str|None]=mapped_column(String(80))
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
 class AnonymousAllowance(Base):
     __tablename__="anonymous_allowances"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); device_hash: Mapped[str]=mapped_column(String(64),unique=True,index=True); ip_hash: Mapped[str]=mapped_column(String(64),index=True); credit_balance: Mapped[int]=mapped_column(Integer,default=100); api_budget_used: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)

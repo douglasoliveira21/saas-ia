@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     rag_min_similarity: float = 0.32
     rag_pgvector_enabled: bool = False
     default_ai_model: str = "deepseek-ai/DeepSeek-V4-Flash"
+    document_ai_model: str = "deepseek-ai/DeepSeek-V4-Pro"
     vision_ai_model: str = "Qwen/Qwen3-VL-235B-A22B-Instruct"
     image_ai_model: str = "Qwen/Qwen-Image-Max"
     image_fallback_ai_model: str = "black-forest-labs/FLUX-1-schnell"

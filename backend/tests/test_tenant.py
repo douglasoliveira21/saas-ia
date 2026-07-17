@@ -81,3 +81,17 @@ def test_training_samples_remove_personal_and_secret_data():
     assert "123.456.789-10" not in cleaned
     assert "segredo-super-secreto-123" not in cleaned
 
+
+def test_text_module_escalates_complex_work_and_uses_dynamic_output_limits():
+    from app.config import settings
+    from app.main import text_model_and_output_limit
+    model, limit = text_model_and_output_limit("Traduza esta frase curta")
+    assert model == settings.default_ai_model
+    assert limit == 1500
+    model, limit = text_model_and_output_limit("Crie um relatório completo com análise profunda dos riscos jurídicos")
+    assert model == settings.document_ai_model
+    assert limit == 7000
+    model, limit = text_model_and_output_limit("Pesquise as notícias mais recentes", web_search=True)
+    assert model == settings.default_ai_model
+    assert limit == 3500
+

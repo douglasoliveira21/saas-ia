@@ -66,6 +66,38 @@ def public_module(route:str)->str:
     if route in {"image_generation","vision"}: return "images"
     if route=="audio": return "audio"
     return "text_documents"
+def text_model_and_output_limit(message:str,documents:list[File]|None=None,web_search:bool=False,has_rag:bool=False)->tuple[str,int]:
+    text=normalized_intent_text(message); documents=documents or []
+    report=bool(re.search(r"\b(relatorio|parecer|estudo|plano detalhado|analise completa|analise profunda|auditoria|dossie|documento completo)\b",text))
+    critical=bool(re.search(r"\b(contrato|juridic|legal|compliance|risco|financeir|fiscal|tribut|licitacao|diagnostico|estrategia)\b",text))
+    document_chars=sum(len(item.extracted_text or "") for item in documents)
+    use_pro=bool(documents or report or critical or has_rag and len(message)>1200)
+    if report: max_tokens=7000
+    elif documents: max_tokens=5000 if document_chars>80000 or critical else 3500
+    elif web_search: max_tokens=3500
+    elif has_rag: max_tokens=3000
+    else: max_tokens=1500
+    return settings.document_ai_model if use_pro else settings.default_ai_model,max_tokens
+async def streamed_chat_completion(payload:dict,on_delta)->tuple[str,dict]:
+    parts=[]; usage={}
+    streaming_payload={**payload,"stream":True,"stream_options":{"include_usage":True}}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(300,connect=10)) as client:
+        async with client.stream("POST",f"{settings.deepinfra_base_url}/chat/completions",json=streaming_payload,headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if not line.startswith("data:"): continue
+                value=line[5:].strip()
+                if not value or value=="[DONE]": continue
+                try: chunk=json.loads(value)
+                except json.JSONDecodeError: continue
+                if chunk.get("usage"): usage=chunk["usage"]
+                choices=chunk.get("choices") or []
+                delta=(choices[0].get("delta") or {}).get("content") if choices else None
+                if delta:
+                    parts.append(delta)
+                    await on_delta(delta)
+    if not parts: raise HTTPException(502,"O provedor não retornou conteúdo para a resposta.")
+    return "".join(parts),usage
 
 def image_provider_error(status_code:int|None)->tuple[int,str]:
     if status_code in {401,403}: return 503,"A geração de imagens está indisponível porque a credencial do provedor precisa ser verificada. Nenhum crédito foi consumido."
@@ -710,7 +742,7 @@ def reindex_file(item_id:str,user=Depends(current_user),db:Session=Depends(get_d
     if user.role not in {"owner","admin","superadmin"} and item.user_id!=user.id: raise HTTPException(403,"Sem permissão para reindexar este arquivo")
     if item.mime_type not in INDEXABLE_MIMES: raise HTTPException(400,"Este tipo de arquivo não pode ser indexado")
     item.index_status="pending"; item.index_error=None; db.commit(); task_id=queue_index(item.id,strict=True); return {"file_id":item.id,"status":"pending","task_id":task_id}
-async def ai_answer(data:ChatIn,user,db):
+async def ai_answer(data:ChatIn,user,db,on_delta=None):
     if data.folder_id: tenant_get(db,Folder,data.folder_id,user)
     conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,folder_id=data.folder_id,title=data.message[:70])
     if not data.conversation_id: db.add(conv); db.flush()
@@ -740,9 +772,10 @@ async def ai_answer(data:ChatIn,user,db):
     file_intent=bool(requested_extension and requested_extension!="xlsx" and re.search(r"\b(crie|criar|gere|gerar|faça|produza|monte|escreva)\b.{0,120}\b(arquivo|documento|word|docx|pdf|powerpoint|pptx|csv|texto|txt|markdown|html|json|xml|yaml|rtf|python|javascript|typescript|css|sql|shell|powershell)\b|\b(arquivo|documento|word|docx|pdf|powerpoint|pptx|csv|texto|txt|markdown|html|json|xml|yaml|rtf)\b.{0,120}\b(crie|criar|gere|gerar|faça|produza|monte|escreva)\b",data.message.lower()))
     if file_intent and not attached:
         if not settings.deepinfra_api_key: raise HTTPException(503,"Configure DEEPINFRA_API_KEY para gerar arquivos")
+        generation_model,generation_limit=text_model_and_output_limit(data.message)
         structure_prompt=f"""Crie o conteúdo completo solicitado para um arquivo .{requested_extension}. Retorne somente JSON válido com esta estrutura abrangente: {{"filename":"nome.{requested_extension}","title":"Título","subtitle":"Subtítulo opcional","sections":[{{"heading":"Seção","paragraphs":["Parágrafo"],"bullets":["Item"],"table":{{"headers":["Coluna"],"rows":[["Valor"]]}}}}],"slides":[{{"title":"Slide","bullets":["Item"]}}],"sheets":[{{"name":"Dados","headers":["Coluna"],"rows":[["Valor"]]}}],"text":"conteúdo textual integral quando for arquivo de texto ou código","data":{{"chave":"valor"}}}}. Preencha as propriedades adequadas ao formato e à solicitação. Não use Markdown fora dos valores JSON."""
         async with httpx.AsyncClient(timeout=120) as client:
-            response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":settings.default_ai_model,"messages":[{"role":"system","content":structure_prompt},{"role":"user","content":data.message}],"temperature":.25,"max_tokens":6000,"response_format":{"type":"json_object"}},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":generation_model,"messages":[{"role":"system","content":structure_prompt},{"role":"user","content":data.message}],"temperature":.25,"max_tokens":max(5000,generation_limit),"response_format":{"type":"json_object"}},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
         response.raise_for_status(); result=response.json(); spec=content_spec(result["choices"][0]["message"]["content"])
         requested_name=pathlib.Path(str(spec.get("filename") or f"arquivo.{requested_extension}")).name
         safe_stem=re.sub(r"[^\w .-]","_",pathlib.Path(requested_name).stem,flags=re.UNICODE).strip(" .") or "arquivo"
@@ -751,9 +784,9 @@ async def ai_answer(data:ChatIn,user,db):
         generated=File(company_id=user.company_id,user_id=user.id,name=safe_name,path=str(output_path),mime_type=FILE_MIMES[requested_extension],size=output_path.stat().st_size)
         db.add(generated); db.flush(); answer=f"Pronto — criei o arquivo **{safe_name}** conforme solicitado.\n\n[Baixar {safe_name}](/api/v1/files/{generated.id}/download)"
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
-        db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
+        db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=generation_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit()
         if generated.mime_type in INDEXABLE_MIMES: queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"file_generation","module":"text_documents","image":None,"usage":{"input":inp,"output":out}}
+        return {"conversation_id":conv.id,"message":answer,"model":generation_model,"route":"file_generation","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False}
     spreadsheet_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|monte)\b.{0,80}\b(planilha|excel|xlsx)\b|\b(planilha|excel|xlsx)\b.{0,80}\b(crie|criar|gere|gerar|faça|produza|monte)\b",data.message.lower()))
     if spreadsheet_intent and not attached:
         if not settings.deepinfra_api_key: raise HTTPException(503,"Configure DEEPINFRA_API_KEY para gerar planilhas")
@@ -771,7 +804,7 @@ async def ai_answer(data:ChatIn,user,db):
         answer=f"Pronto — criei a planilha **{safe_name}** conforme solicitado.\n\n[Baixar {safe_name}](/api/v1/files/{generated.id}/download)"
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=(inp*.0000005+out*.0000008))); db.commit(); queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","module":"text_documents","image":None,"usage":{"input":inp,"output":out}}
+        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False}
     image_intent=is_image_generation_request(data.message)
     if image_intent and not attached:
         if not settings.deepinfra_api_key and not settings.bfl_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
@@ -782,7 +815,7 @@ async def ai_answer(data:ChatIn,user,db):
         assistant_message=Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)
         db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=image_model if image_data else settings.image_ai_model,input_tokens=0,output_tokens=0,cost=0)); db.commit()
         image_url=f"/messages/{assistant_message.id}/image" if image_data else None
-        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","module":"images","image":image_url,"usage":{"input":0,"output":0}}
+        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","module":"images","image":image_url,"usage":{"input":0,"output":0},"streamed":False}
     rag_hits=[]
     if not attached and settings.deepinfra_api_key:
         ready_query=select(File.id).outerjoin(Folder,Folder.id==File.folder_id).where(File.company_id==user.company_id,File.index_status=="ready")
@@ -875,19 +908,33 @@ async def ai_answer(data:ChatIn,user,db):
     if settings.deepinfra_api_key:
         if web_search:
             api_messages[0]["content"]+="\n\nForneça uma resposta substancial e autocontida. Comece pela resposta direta e depois explique contexto, dados relevantes, ressalvas e divergências. Salvo se o usuário pedir concisão, desenvolva pelo menos 3 a 5 parágrafos ou uma estrutura equivalente. Associe links Markdown às afirmações factuais correspondentes."
-        payload={"model":model,"messages":api_messages,"temperature":agent.temperature if agent else .7,"max_tokens":1800 if web_search else 1200}
-        async with httpx.AsyncClient(timeout=120) as client:
-            res=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json=payload,headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}); res.raise_for_status(); result=res.json()
-        answer=result["choices"][0]["message"]["content"]
+        if images:
+            output_limit=3000
+        elif audio_files:
+            output_limit=4000 if is_meeting_analysis_request(data.message) else 2500
+        else:
+            model,output_limit=text_model_and_output_limit(data.message,documents,web_search,bool(rag_hits))
+        payload={"model":model,"messages":api_messages,"temperature":agent.temperature if agent else .7,"max_tokens":output_limit}
+        streamed=bool(on_delta)
+        if on_delta:
+            answer,usage=await streamed_chat_completion(payload,on_delta)
+        else:
+            async with httpx.AsyncClient(timeout=300) as client:
+                res=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json=payload,headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"}); res.raise_for_status(); result=res.json()
+            answer=result["choices"][0]["message"]["content"]; usage=result.get("usage",{})
+        raw_answer=answer
         if web_search: answer=ensure_web_sources(answer,web_results)
         if rag_hits: answer=ensure_rag_sources(answer,rag_hits)
-        usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
-    else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4
+        if on_delta and answer!=raw_answer:
+            supplement=answer[len(raw_answer):] if answer.startswith(raw_answer) else "\n\n"+answer
+            if supplement: await on_delta(supplement)
+        inp=usage.get("prompt_tokens",max(1,sum(len(str(item.get("content",""))) for item in api_messages)//4)); out=usage.get("completion_tokens",max(1,len(answer)//4))
+    else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4; streamed=False
     route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "text"
     db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=estimated_api_cost,credits=charged_credits))
     if user.training_opt_in and not attached: db.add(TrainingSample(company_id=user.company_id,user_id=user.id,prompt=anonymize_training_text(data.message),response=anonymize_training_text(answer),model=model,category=route,consented_at=datetime.now(timezone.utc)))
     db.commit()
-    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"module":public_module(route),"image":None,"usage":{"input":inp,"output":out}}
+    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"module":public_module(route),"image":None,"usage":{"input":inp,"output":out},"streamed":streamed}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)): return await ai_answer(data,user,db)
 @app.post(API+"/usage/estimate")
@@ -909,11 +956,11 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
         if route=="image_generation":
             encoded,_=await generate_image_b64(data.message); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
         else:
-            model=settings.default_ai_model; system=OFFICIAL_PROMPT
+            model,output_limit=text_model_and_output_limit(data.message,web_search=route=="web_search"); system=OFFICIAL_PROMPT
             if route=="web_search" and settings.tavily_api_key:
                 async with httpx.AsyncClient(timeout=30) as client: search=await client.post(f"{settings.tavily_base_url}/search",headers={"Authorization":f"Bearer {settings.tavily_api_key}"},json={"query":data.message,"search_depth":"basic","max_results":5})
                 if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
-            async with httpx.AsyncClient(timeout=120) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":1000},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
+            async with httpx.AsyncClient(timeout=300) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":output_limit},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
             response.raise_for_status(); answer=response.json()["choices"][0]["message"]["content"]; image=None
         db.commit(); return {"message":answer,"image":image,"module":public_module(route),"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
     except HTTPException:
@@ -959,7 +1006,9 @@ async def chat_stream(ws:WebSocket):
                 status="Módulo de texto e documentos: preparando a resposta..."
             await ws.send_json({"type":"status","content":status,"module":"audio" if has_audio else "images" if has_images or is_image_generation_request(request_text) else "text_documents"})
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",request_text.lower()): await ws.send_json({"type":"status","content":"Módulo de texto e documentos: pesquisando informações atualizadas...","module":"text_documents"})
-            answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db))
+            async def forward_delta(content:str):
+                await ws.send_json({"type":"delta","content":content})
+            answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db,on_delta=forward_delta))
             control_task=asyncio.create_task(ws.receive_json())
             finished,_=await asyncio.wait({answer_task,control_task},return_when=asyncio.FIRST_COMPLETED)
             if control_task in finished:
@@ -973,8 +1022,8 @@ async def chat_stream(ws:WebSocket):
             control_task.cancel()
             with suppress(asyncio.CancelledError): await control_task
             result=await answer_task
-            words=result["message"].split(" ")
-            for word in words: await ws.send_json({"type":"delta","content":word+" "}); await asyncio.sleep(.01)
+            if not result.get("streamed"):
+                await ws.send_json({"type":"delta","content":result["message"]})
             await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"module":result.get("module"),"image":result.get("image"),"usage":result["usage"]})
     except WebSocketDisconnect: pass
     except HTTPException as exc:

@@ -60,7 +60,29 @@ class AIUsageLedger(Base):
     operation: Mapped[str]=mapped_column(String(40)); estimated_cost: Mapped[float]=mapped_column(Float); actual_cost: Mapped[float|None]=mapped_column(Float)
     reserved_credits: Mapped[int]=mapped_column(Integer); final_credits: Mapped[int]=mapped_column(Integer)
     status: Mapped[str]=mapped_column(String(30)); latency_ms: Mapped[int]=mapped_column(Integer); error_code: Mapped[str|None]=mapped_column(String(80))
+    reservation_id: Mapped[str|None]=mapped_column(String(36),index=True); idempotency_key: Mapped[str|None]=mapped_column(String(128),index=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class AIUsageReservation(Base):
+    __tablename__="ai_usage_reservations"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); idempotency_key: Mapped[str]=mapped_column(String(128),unique=True,index=True)
+    company_id: Mapped[str|None]=mapped_column(ForeignKey("companies.id",ondelete="SET NULL"),index=True); user_id: Mapped[str|None]=mapped_column(ForeignKey("users.id",ondelete="SET NULL"),index=True); anonymous_device_hash: Mapped[str|None]=mapped_column(String(64),index=True)
+    provider: Mapped[str]=mapped_column(String(40)); model: Mapped[str]=mapped_column(String(160)); operation: Mapped[str]=mapped_column(String(40))
+    estimated_cost: Mapped[float]=mapped_column(Float); actual_cost: Mapped[float|None]=mapped_column(Float); reserved_credits: Mapped[int]=mapped_column(Integer); final_credits: Mapped[int]=mapped_column(Integer,default=0)
+    status: Mapped[str]=mapped_column(String(50),index=True); provider_request_id: Mapped[str|None]=mapped_column(String(160)); response_payload: Mapped[dict|None]=mapped_column(JSON); error_code: Mapped[str|None]=mapped_column(String(80))
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); finalized_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+class ProviderPrice(Base):
+    __tablename__="provider_prices"; __table_args__=(Index("ix_provider_prices_lookup","provider","model","valid_from"),)
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); provider: Mapped[str]=mapped_column(String(40)); model: Mapped[str]=mapped_column(String(160)); operation: Mapped[str]=mapped_column(String(40),default="text")
+    input_token_price: Mapped[float]=mapped_column(Float,default=0); output_token_price: Mapped[float]=mapped_column(Float,default=0); image_price: Mapped[float]=mapped_column(Float,default=0); audio_minute_price: Mapped[float]=mapped_column(Float,default=0); currency: Mapped[str]=mapped_column(String(3),default="BRL")
+    valid_from: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); valid_until: Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class PasswordResetToken(Base):
+    __tablename__="password_reset_tokens"
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); user_id: Mapped[str]=mapped_column(ForeignKey("users.id",ondelete="CASCADE"),index=True); token_hash: Mapped[str]=mapped_column(String(64),unique=True,index=True)
+    expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True); used_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True)); requested_ip: Mapped[str|None]=mapped_column(String(80)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class AdminAuditLog(Base):
+    __tablename__="admin_audit_log"; __table_args__=(Index("ix_admin_audit_created","created_at"),)
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); actor_user_id: Mapped[str|None]=mapped_column(String(36),index=True); target_user_id: Mapped[str|None]=mapped_column(String(36),index=True); company_id: Mapped[str|None]=mapped_column(String(36),index=True)
+    action: Mapped[str]=mapped_column(String(80),index=True); details: Mapped[dict]=mapped_column(JSON,default=dict); ip_address: Mapped[str|None]=mapped_column(String(80)); user_agent: Mapped[str|None]=mapped_column(String(500)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
 class AnonymousAllowance(Base):
     __tablename__="anonymous_allowances"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); device_hash: Mapped[str]=mapped_column(String(64),unique=True,index=True); ip_hash: Mapped[str]=mapped_column(String(64),index=True); credit_balance: Mapped[int]=mapped_column(Integer,default=100); api_budget_used: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)

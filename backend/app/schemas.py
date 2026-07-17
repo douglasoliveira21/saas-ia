@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime
 class Register(BaseModel): company_name:str=Field(min_length=2,max_length=160); document:str|None=None; name:str; email:EmailStr; password:str=Field(min_length=8)
 class Login(BaseModel): email:EmailStr; password:str
 class Refresh(BaseModel): refresh_token:str
@@ -7,8 +8,8 @@ class InviteIn(BaseModel): email:EmailStr; role:str="member"
 class AcceptInvite(BaseModel): token:str; name:str; password:str=Field(min_length=8)
 class FolderIn(BaseModel): name:str; shared:bool=False; permissions:dict={}
 class UpdateConversation(BaseModel): folder_id:str|None=None; favorite:bool|None=None; title:str|None=None
-class ChatIn(BaseModel): conversation_id:str|None=None; agent_id:str|None=None; folder_id:str|None=None; file_ids:list[str]=[]; message:str=Field(min_length=1,max_length=30000)
-class AnonymousChatIn(BaseModel): device_id:str=Field(min_length=20,max_length=120); message:str=Field(min_length=1,max_length=12000)
+class ChatIn(BaseModel): conversation_id:str|None=None; agent_id:str|None=None; folder_id:str|None=None; file_ids:list[str]=[]; message:str=Field(min_length=1,max_length=30000); idempotency_key:str|None=Field(None,min_length=16,max_length=128)
+class AnonymousChatIn(BaseModel): device_id:str=Field(min_length=20,max_length=120); message:str=Field(min_length=1,max_length=12000); idempotency_key:str|None=Field(None,min_length=16,max_length=128)
 class AnonymousStatusIn(BaseModel): device_id:str=Field(min_length=20,max_length=120)
 class UserSettingsIn(BaseModel):
     name:str|None=Field(None,min_length=2,max_length=120); preferred_name:str|None=Field(None,max_length=120); occupation:str|None=Field(None,max_length=80); custom_instructions:str|None=Field(None,max_length=5000)
@@ -16,3 +17,8 @@ class UserSettingsIn(BaseModel):
     location_lat:float|None=Field(None,ge=-90,le=90); location_lng:float|None=Field(None,ge=-180,le=180); location_timezone:str|None=Field(None,max_length=80)
 class AdminUserUpdate(BaseModel):
     name:str|None=Field(None,min_length=2,max_length=120); email:EmailStr|None=None; status:str|None=None; role:str|None=None; plan:str|None=None; password:str|None=Field(None,min_length=8,max_length=128)
+class PasswordForgotIn(BaseModel): email:EmailStr
+class PasswordResetIn(BaseModel): token:str=Field(min_length=32,max_length=200); password:str=Field(min_length=8,max_length=128)
+class ProviderPriceIn(BaseModel):
+    provider:str=Field(min_length=2,max_length=40); model:str=Field(min_length=2,max_length=160); operation:str=Field("text",max_length=40)
+    input_token_price:float=Field(0,ge=0); output_token_price:float=Field(0,ge=0); image_price:float=Field(0,ge=0); audio_minute_price:float=Field(0,ge=0); currency:str=Field("BRL",min_length=3,max_length=3); valid_from:datetime|None=None

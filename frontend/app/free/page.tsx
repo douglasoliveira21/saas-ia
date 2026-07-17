@@ -89,6 +89,7 @@ export default function FreeChat(){
     e.preventDefault();
     if(!text.trim()||busy||!device)return;
     const prompt=text.trim();
+    const idempotency_key=crypto.randomUUID();
     const base=active||{id:crypto.randomUUID(),title:prompt.slice(0,55),messages:[],updatedAt:Date.now()};
     const pending={...base,messages:[...base.messages,{role:"user" as const,content:prompt}],updatedAt:Date.now()};
     setText("");
@@ -98,7 +99,7 @@ export default function FreeChat(){
     const controller=new AbortController();
     abortRef.current=controller;
     try{
-      const response=await fetch(API+"/anonymous/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({device_id:device,message:prompt}),signal:controller.signal});
+      const response=await fetch(API+"/anonymous/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({device_id:device,message:prompt,idempotency_key}),signal:controller.signal});
       const data=await response.json();
       if(response.status===402){setBlocked(true);throw new Error(data.detail?.message||"Limite gratuito atingido")}
       if(!response.ok)throw new Error(typeof data.detail==="string"?data.detail:"Erro inesperado");

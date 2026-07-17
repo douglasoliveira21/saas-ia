@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     image_edit_ai_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
     audio_ai_model: str = "mistralai/Voxtral-Mini-3B-2507"
     noisy_audio_ai_model: str = "mistralai/Voxtral-Small-24B-2507"
+    usd_to_brl_rate: float = 5.50
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_starter_price_id: str = ""

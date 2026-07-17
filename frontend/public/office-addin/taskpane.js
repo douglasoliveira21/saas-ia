@@ -27,7 +27,7 @@ Office.onReady(() => {
       if (!token) { window.open("https://app.solvitsoft.com.br/login","_blank"); throw new Error("Entre na SolvitSoft e abra novamente o painel."); }
       const source=await currentContext();
       const prompt=document.getElementById("prompt").value;
-      const response=await fetch(API+"/chat",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({message:`Contexto do Microsoft ${Office.context.host}:\n${source.slice(0,25000)}\n\nSolicitação: ${prompt}`,file_ids:[]})});
+      const response=await fetch(API+"/chat",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({message:`Contexto do Microsoft ${Office.context.host}:\n${source.slice(0,25000)}\n\nSolicitação: ${prompt}`,file_ids:[],idempotency_key:crypto.randomUUID()})});
       if (!response.ok) throw new Error((await response.json()).detail || "Falha na API");
       lastAnswer=(await response.json()).message;
       document.getElementById("answer").textContent=lastAnswer; status("Resposta concluída.");

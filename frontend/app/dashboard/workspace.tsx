@@ -219,6 +219,7 @@ export default function Workspace() {
     setCollapsed(false);
     setError("");
     const prompt = text;
+    const idempotency_key = crypto.randomUUID();
     setActiveModule(null);
     const aid = crypto.randomUUID();
     try {
@@ -255,6 +256,7 @@ export default function Workspace() {
             agent_id: agentId || null,
             file_ids,
             message: prompt,
+            idempotency_key,
           }),
         );
       socket.onmessage = async (e) => {
@@ -907,8 +909,8 @@ function AdminSettings(){
   const [items,setItems]=useState<AdminUser[]>([]);const [loading,setLoading]=useState(true);const [search,setSearch]=useState("");
   const load=()=>call("/admin/users").then(setItems).finally(()=>setLoading(false));useEffect(()=>{load()},[]);
   async function update(id:string,body:object){await call(`/admin/users/${id}`,{method:"PATCH",body:JSON.stringify(body)});await load()}
-  async function edit(account:AdminUser){const name=prompt("Nome completo:",account.name);if(name===null)return;const email=prompt("E-mail:",account.email);if(email===null)return;const password=prompt("Nova senha (deixe vazio para manter):","");await update(account.id,{name,email,...(password?{password}:{})})}
-  async function reset(id:string){if(!confirm("Gerar uma nova senha temporária e desconectar todos os dispositivos deste usuário?"))return;const data=await call(`/admin/users/${id}/reset-password`,{method:"POST"});prompt(data.delivered?`A nova senha foi enviada para ${data.email}. Você também pode copiá-la:`:`O SMTP não enviou o e-mail. Copie e envie a senha para ${data.email} por um canal seguro:`,data.temporary_password)}
+  async function edit(account:AdminUser){const name=prompt("Nome completo:",account.name);if(name===null)return;const email=prompt("E-mail:",account.email);if(email===null)return;await update(account.id,{name,email})}
+  async function reset(id:string){if(!confirm("Enviar um link seguro de redefinição de senha, válido por 15 minutos?"))return;const data=await call(`/admin/users/${id}/reset-password`,{method:"POST"});alert(data.message)}
   const filtered=items.filter(x=>(x.name+" "+x.email+" "+(x.company?.name||"")).toLowerCase().includes(search.toLowerCase()));
   return <div><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Proprietário do sistema</p><h2 className="mt-1 text-3xl font-semibold">Administração global</h2><p className="mt-2 text-sm text-zinc-500">Usuários, empresas, planos e acessos de toda a SolvitSoft.</p></div><div className="rounded-2xl bg-zinc-950 px-5 py-3 text-white"><p className="text-xs text-zinc-300">Seu plano</p><p className="font-semibold">Ilimitado</p></div></div><input className={`${input} mt-7`} placeholder="Buscar nome, e-mail ou empresa..." value={search} onChange={e=>setSearch(e.target.value)}/>{loading?<PanelLoading/>:<div className="mt-5 space-y-3">{filtered.map(account=><div key={account.id} className="rounded-2xl border p-4"><div className="flex flex-wrap items-start gap-3"><span className="grid h-10 w-10 place-items-center rounded-full bg-zinc-900 text-white">{account.name[0]?.toUpperCase()}</span><div className="min-w-0 flex-1"><p className="font-semibold">{account.name}</p><p className="break-all text-xs text-zinc-500">{account.email}</p><p className="mt-1 text-xs text-zinc-500">{account.company?.name||"Sem empresa"} · Criado em {new Date(account.created_at).toLocaleDateString("pt-BR")}</p></div><button onClick={()=>edit(account)} className="rounded-lg border px-3 py-2 text-xs">Editar</button><button onClick={()=>reset(account.id)} className="rounded-lg border px-3 py-2 text-xs">Nova senha</button></div><div className="mt-4 grid gap-2 sm:grid-cols-3"><select value={account.company?.plan||"free"} disabled={!account.company||account.role==="superadmin"} onChange={e=>update(account.id,{plan:e.target.value})} className="rounded-lg border bg-white p-2 text-xs"><option value="free">Gratuito</option><option value="starter">Essencial</option><option value="professional">Profissional</option><option value="premium">Premium</option><option value="enterprise">Empresa</option></select><select value={account.status} disabled={account.role==="superadmin"} onChange={e=>update(account.id,{status:e.target.value})} className="rounded-lg border bg-white p-2 text-xs"><option value="active">Ativo</option><option value="inactive">Inativo</option></select><div className="rounded-lg bg-zinc-50 p-2 text-xs">{account.role==="superadmin"?"Superadmin · Ilimitado":`${account.company?.credit_balance||0} créditos · R$ ${(account.company?.api_budget_used||0).toFixed(2)}`}</div></div></div>)}</div>}</div>
 }

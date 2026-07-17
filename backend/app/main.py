@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
 from cryptography.fernet import Fernet
 from sqlalchemy import select, func, or_, delete
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import Session
 import httpx, stripe
 from redis.asyncio import Redis
@@ -31,10 +31,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from bs4 import BeautifulSoup
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, AIUsageLedger, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, AIUsageLedger, AIUsageReservation, ProviderPrice, PasswordResetToken, AdminAuditLog, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
 from app.worker import process_document
-from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, AnonymousStatusIn, UserSettingsIn, AdminUserUpdate
+from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, AnonymousStatusIn, UserSettingsIn, AdminUserUpdate, PasswordForgotIn, PasswordResetIn, ProviderPriceIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
 
@@ -61,6 +61,25 @@ PLANS={
 def request_ip(request:Request)->str:
     forwarded=(request.headers.get("cf-connecting-ip") or request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     return forwarded or (request.client.host if request.client else "unknown")
+def add_admin_audit(db:Session,request:Request,action:str,actor:User|None=None,target:User|None=None,company_id:str|None=None,details:dict|None=None):
+    db.add(AdminAuditLog(actor_user_id=actor.id if actor else None,target_user_id=target.id if target else None,company_id=company_id or (target.company_id if target else None),action=action,details=details or {},ip_address=request_ip(request),user_agent=(request.headers.get("user-agent") or "")[:500]))
+def send_password_reset_email(account:User,raw_token:str)->bool:
+    if not (settings.smtp_host and settings.smtp_user and settings.smtp_password): return False
+    reset_url=f"{settings.frontend_url}/redefinir-senha?token={raw_token}"
+    try:
+        message=EmailMessage(); message["Subject"]="Redefinição de senha — SolvitSoft IA"; message["From"]=settings.smtp_from or settings.smtp_user; message["To"]=account.email
+        message.set_content(f"Olá, {account.name}.\n\nUse o link abaixo para redefinir sua senha:\n{reset_url}\n\nO link é de uso único e expira em 15 minutos. Se você não solicitou isso, ignore esta mensagem.")
+        with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=20) as smtp: smtp.starttls(); smtp.login(settings.smtp_user,settings.smtp_password); smtp.send_message(message)
+        return True
+    except Exception:
+        logger.exception("Password reset email failed for user %s",account.id); return False
+def issue_password_reset(db:Session,account:User,request:Request,actor:User|None=None)->bool:
+    now_value=datetime.now(timezone.utc)
+    for old in db.scalars(select(PasswordResetToken).where(PasswordResetToken.user_id==account.id,PasswordResetToken.used_at==None)).all(): old.used_at=now_value
+    raw=random_token(); db.add(PasswordResetToken(user_id=account.id,token_hash=token_hash(raw),expires_at=now_value+timedelta(minutes=15),requested_ip=request_ip(request)))
+    if actor: add_admin_audit(db,request,"password_reset_requested",actor,target=account,details={"delivery":"email"})
+    db.commit()
+    return send_password_reset_email(account,raw)
 async def enforce_rate_limit(scope:str,identity:str,limit:int,window_seconds:int):
     identity_hash=hashlib.sha256(identity.encode()).hexdigest()[:32]
     bucket=int(time.time()//window_seconds); key=f"rate:{scope}:{identity_hash}:{bucket}"
@@ -85,28 +104,49 @@ def provider_metadata(payload:dict|None=None,headers=None)->tuple[str|None,float
     actual=None
     for value in candidates:
         try:
-            if value is not None: actual=float(value); break
+            if value is not None: actual=float(value)*settings.usd_to_brl_rate; break
         except (TypeError,ValueError): pass
     return str(request_id)[:160] if request_id else None,actual
 def effective_cost(estimated:float,actual:float|None)->float:
     return max(0,float(actual)) if actual is not None else max(0,float(estimated))
-def reconcile_company_cost(db:Session,user:User,estimated:float,actual:float|None):
-    if user.role=="superadmin": return
-    company=db.get(Company,user.company_id)
-    company.api_budget_used=max(0,float(company.api_budget_used)+(effective_cost(estimated,actual)-float(estimated)))
-def add_usage_ledger(db:Session,*,user:User|None,provider:str,model:str,request_id:str|None,operation:str,estimated_cost:float,actual_cost:float|None,reserved_credits:int,final_credits:int,status:str,started_at:float,error_code:str|None=None,anonymous_device_hash:str|None=None):
+def add_usage_ledger(db:Session,*,user:User|None,provider:str,model:str,request_id:str|None,operation:str,estimated_cost:float,actual_cost:float|None,reserved_credits:int,final_credits:int,status:str,started_at:float,error_code:str|None=None,anonymous_device_hash:str|None=None,reservation_id:str|None=None,idempotency_key:str|None=None):
     db.add(AIUsageLedger(
         company_id=user.company_id if user else None,user_id=user.id if user else None,anonymous_device_hash=anonymous_device_hash,
         provider=provider,model=model,provider_request_id=request_id,operation=operation,estimated_cost=estimated_cost,actual_cost=actual_cost,
-        reserved_credits=reserved_credits,final_credits=final_credits,status=status,latency_ms=max(0,int((time.perf_counter()-started_at)*1000)),error_code=error_code,
+        reserved_credits=reserved_credits,final_credits=final_credits,status=status,latency_ms=max(0,int((time.perf_counter()-started_at)*1000)),error_code=error_code,reservation_id=reservation_id,idempotency_key=idempotency_key,
     ))
-def record_failed_ledger(*,company_id:str|None,user_id:str|None,provider:str,model:str,operation:str,estimated_cost:float,reserved_credits:int,started_at:float,error_code:str,anonymous_device_hash:str|None=None):
-    audit_db=SessionLocal()
+def append_reservation_event(reservation_id:str,status:str,error_code:str|None=None,provider:str|None=None,model:str|None=None,request_id:str|None=None):
+    event_db=SessionLocal(); started=time.perf_counter()
     try:
-        audit_db.add(AIUsageLedger(company_id=company_id,user_id=user_id,anonymous_device_hash=anonymous_device_hash,provider=provider,model=model,operation=operation,estimated_cost=estimated_cost,actual_cost=None,reserved_credits=reserved_credits,final_credits=0,status="failed",latency_ms=max(0,int((time.perf_counter()-started_at)*1000)),error_code=error_code[:80]))
-        audit_db.commit()
-    except Exception: audit_db.rollback(); logger.exception("Could not persist failed AI usage ledger")
-    finally: audit_db.close()
+        item=event_db.get(AIUsageReservation,reservation_id)
+        if not item: return
+        db_user=event_db.get(User,item.user_id) if item.user_id else None
+        add_usage_ledger(event_db,user=db_user,provider=provider or item.provider,model=model or item.model,request_id=request_id,operation=item.operation,estimated_cost=item.estimated_cost,actual_cost=None,reserved_credits=item.reserved_credits,final_credits=0,status=status,started_at=started,error_code=error_code,anonymous_device_hash=item.anonymous_device_hash,reservation_id=item.id,idempotency_key=item.idempotency_key)
+        event_db.commit()
+    finally: event_db.close()
+def mark_provider_completed(reservation_id:str,provider:str,model:str,request_id:str|None,actual_cost:float|None):
+    event_db=SessionLocal(); started=time.perf_counter()
+    try:
+        item=event_db.scalar(select(AIUsageReservation).where(AIUsageReservation.id==reservation_id).with_for_update())
+        if not item: return
+        item.provider=provider; item.model=model; item.provider_request_id=request_id; item.actual_cost=actual_cost; item.updated_at=datetime.now(timezone.utc)
+        db_user=event_db.get(User,item.user_id) if item.user_id else None
+        add_usage_ledger(event_db,user=db_user,provider=provider,model=model,request_id=request_id,operation=item.operation,estimated_cost=item.estimated_cost,actual_cost=actual_cost,reserved_credits=item.reserved_credits,final_credits=0,status="provider_completed",started_at=started,anonymous_device_hash=item.anonymous_device_hash,reservation_id=item.id,idempotency_key=item.idempotency_key)
+        event_db.commit()
+    finally: event_db.close()
+def reservation_provider_result(reservation_id:str)->dict|None:
+    lookup_db=SessionLocal()
+    try:
+        item=lookup_db.get(AIUsageReservation,reservation_id)
+        completed=lookup_db.scalar(select(AIUsageLedger.id).where(AIUsageLedger.reservation_id==reservation_id,AIUsageLedger.status=="provider_completed").limit(1))
+        return {"provider":item.provider,"model":item.model,"request_id":item.provider_request_id,"actual_cost":item.actual_cost} if item and completed else None
+    finally: lookup_db.close()
+def active_provider_price(provider:str,model:str,operation:str)->ProviderPrice|None:
+    price_db=SessionLocal()
+    try:
+        now_value=datetime.now(timezone.utc)
+        return price_db.scalar(select(ProviderPrice).where(ProviderPrice.provider==provider,ProviderPrice.model==model,ProviderPrice.operation==operation,ProviderPrice.valid_from<=now_value,or_(ProviderPrice.valid_until==None,ProviderPrice.valid_until>now_value)).order_by(ProviderPrice.valid_from.desc()).limit(1))
+    finally: price_db.close()
 def normalized_intent_text(value:str)->str:
     return "".join(char for char in unicodedata.normalize("NFKD",value.lower()) if not unicodedata.combining(char))
 def is_image_generation_request(message:str)->bool:
@@ -194,12 +234,13 @@ def format_diarized_transcript(segments:list[dict])->str:
         else: merged.append(current)
     return "\n".join(f"{item['speaker']} [{format_timestamp(item['start'])}-{format_timestamp(item['end'])}]: {item['text']}" for item in merged)
 
-async def analyze_meeting_audio(item:File)->tuple[str,str]:
+async def analyze_meeting_audio(item:File,reservation_id:str|None=None)->tuple[str,str]:
     audio=pathlib.Path(item.path).read_bytes()
     headers={"Authorization":f"Bearer {settings.mistral_api_key}"}
     async with httpx.AsyncClient(timeout=httpx.Timeout(300,connect=15)) as client:
         transcription=await client.post(f"{settings.mistral_base_url.rstrip('/')}/audio/transcriptions",headers=headers,data={"model":settings.meeting_transcription_model,"diarize":"true","timestamp_granularities":"segment"},files={"file":(item.name,audio,item.mime_type)})
         if transcription.is_error:
+            if reservation_id: append_reservation_event(reservation_id,"dependency_failed",f"mistral_transcription_http_{transcription.status_code}",provider="mistral",model=settings.meeting_transcription_model)
             logger.error("Mistral meeting diarization failed status=%s body=%s",transcription.status_code,transcription.text[:1000]); raise HTTPException(502,"Não foi possível separar os participantes da reunião.")
         transcript_data=transcription.json(); transcript=format_diarized_transcript(transcript_data.get("segments",[]))
         if not transcript: transcript=str(transcript_data.get("text") or "").strip()
@@ -207,11 +248,12 @@ async def analyze_meeting_audio(item:File)->tuple[str,str]:
         analysis_prompt=f"""Analise esta gravação de reunião junto da transcrição diarizada abaixo. Produza um relatório em português com: participantes rotulados como Falante 1, Falante 2 etc.; o que cada um disse; tom vocal observável (por exemplo calmo, assertivo, hesitante, tenso ou entusiasmado) com confiança baixa/média/alta e evidências acústicas breves; resumo; decisões; tarefas e responsáveis; divergências e perguntas em aberto. Não identifique pessoas pela voz nem atribua nome, gênero, personalidade, intenção ou estado emocional como fato. Só associe um nome quando a própria fala o declarar claramente, e marque como provável. Diferencie observações acústicas de inferências.\n\nTRANSCRIÇÃO DIARIZADA:\n{transcript[:60000]}"""
         analysis=await client.post(f"{settings.mistral_base_url.rstrip('/')}/chat/completions",headers={**headers,"Content-Type":"application/json"},json={"model":settings.meeting_analysis_model,"messages":[{"role":"user","content":[{"type":"input_audio","input_audio":encoded},{"type":"text","text":analysis_prompt}]}],"temperature":.15,"max_tokens":3000})
         if analysis.is_error:
+            if reservation_id: append_reservation_event(reservation_id,"provider_fallback",f"mistral_analysis_http_{analysis.status_code}",provider="mistral",model=settings.meeting_analysis_model)
             logger.error("Mistral meeting tone analysis failed status=%s body=%s",analysis.status_code,analysis.text[:1000]); return transcript,"A análise acústica de tom não ficou disponível; use apenas a atribuição de falas e a transcrição."
         report=analysis.json()["choices"][0]["message"]["content"]
         return transcript,str(report)
 
-async def generate_image_b64(prompt:str)->tuple[str,str,str,str|None,float|None]:
+async def generate_image_b64(prompt:str,reservation_id:str|None=None)->tuple[str,str,str,str|None,float|None]:
     qwen_native=bool(settings.deepinfra_api_key and settings.image_ai_model.startswith("Qwen/Qwen-Image"))
     if qwen_native:
         try:
@@ -223,8 +265,11 @@ async def generate_image_b64(prompt:str)->tuple[str,str,str,str|None,float|None]
                 request_id,actual_cost=provider_metadata(result,response.headers)
                 return image_b64_from_data_url(result["images"][0]),settings.image_ai_model,"deepinfra",request_id,actual_cost
             logger.error("DeepInfra Qwen image generation failed status=%s body=%s",response.status_code,response.text[:1000])
+            if reservation_id: append_reservation_event(reservation_id,"provider_fallback",f"deepinfra_http_{response.status_code}",provider="deepinfra",model=settings.image_ai_model)
         except HTTPException: raise
-        except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError): logger.exception("DeepInfra Qwen Image Max failed; using image fallback")
+        except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError):
+            logger.exception("DeepInfra Qwen Image Max failed; using image fallback")
+            if reservation_id: append_reservation_event(reservation_id,"provider_fallback","deepinfra_exception",provider="deepinfra",model=settings.image_ai_model)
     if settings.bfl_api_key:
         headers={"accept":"application/json","x-key":settings.bfl_api_key,"Content-Type":"application/json"}
         try:
@@ -252,6 +297,7 @@ async def generate_image_b64(prompt:str)->tuple[str,str,str,str|None,float|None]
         except HTTPException: raise
         except (httpx.HTTPError,KeyError,TypeError,ValueError): logger.exception("BFL FLUX.2 max generation failed; using DeepInfra fallback")
         else: logger.warning("BFL FLUX.2 max did not complete; using DeepInfra fallback")
+        if reservation_id: append_reservation_event(reservation_id,"provider_fallback","bfl_not_completed",provider="bfl",model=settings.bfl_image_model)
     models=list(dict.fromkeys(([settings.image_fallback_ai_model] if qwen_native else [settings.image_ai_model,settings.image_fallback_ai_model]))) if settings.deepinfra_api_key else []
     last_status=None
     for model in models:
@@ -271,12 +317,20 @@ async def generate_image_b64(prompt:str)->tuple[str,str,str,str|None,float|None]
             if response.status_code in {401,402,403}: break
     http_status,message=image_provider_error(last_status)
     raise HTTPException(http_status,message)
+def catalog_cost(route:str,fallback:float,input_tokens:int=0,output_tokens:int=1800,units:float=1)->float:
+    provider,model=operation_model(route); operation="image" if route=="image_generation" else "audio" if route=="audio" else "text"
+    price=active_provider_price(provider,model,operation)
+    if not price: return fallback
+    if operation=="image" and price.image_price>0: return price.image_price*units
+    if operation=="audio" and price.audio_minute_price>0: return price.audio_minute_price*units
+    calculated=(input_tokens/1_000_000)*price.input_token_price+(output_tokens/1_000_000)*price.output_token_price
+    return calculated if calculated>0 else fallback
 def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
     text=message.lower(); tokens=max(1,len(message)//4)+1800; images=[x for x in attached if x.mime_type.startswith("image/")]; audio=[x for x in attached if x.mime_type.startswith("audio/")]; documents=[x for x in attached if x not in images+audio]
-    if is_image_generation_request(message) and not attached: return 20,.10,"image_generation"
+    if is_image_generation_request(message) and not attached: return 20,catalog_cost("image_generation",.10,units=1),"image_generation"
     if images: return 4*len(images),.02*len(images),"vision"
     if audio:
-        minutes=sum(max(1,math.ceil(x.size/(1024*1024))) for x in audio); noisy=bool(re.search(r"\b(ruído|ruido|barulho)\b",text)); return max(3,minutes*(3 if noisy else 1)),minutes*(.012 if noisy else .006),"audio"
+        minutes=sum(max(1,math.ceil(x.size/(1024*1024))) for x in audio); noisy=bool(re.search(r"\b(ruído|ruido|barulho)\b",text)); fallback=minutes*(.012 if noisy else .006); return max(3,minutes*(3 if noisy else 1)),catalog_cost("audio",fallback,units=minutes),"audio"
     if documents:
         volume=0
         for item in documents:
@@ -284,18 +338,96 @@ def estimate_charge(message:str,attached:list[File])->tuple[int,float,str]:
                 try: volume+=max(1,math.ceil(len(PdfReader(item.path).pages)/10))
                 except Exception: volume+=1
             else: volume+=max(1,math.ceil((len(item.extracted_text or "")/4)/10000))
-        return 3+volume,.012+.006*volume,"document"
-    if re.search(r"\b(raciocínio|matemática|lógica|otimização|calcule|demonstre)\b",text): return 4+max(0,math.ceil((tokens-3000)/3000)),.02+tokens*.000002,"reasoning"
-    if re.search(r"\b(código|programação|python|javascript|typescript|react|sql|docker|debug)\b",text): return 3+max(0,math.ceil((tokens-5000)/5000)),.012+tokens*.0000015,"code"
-    if re.search(r"\b(pesquise|internet|notícia|hoje|agora|preço|cotação|clima|placar)\b",text): return 2+max(0,math.ceil((tokens-5000)/5000)),.01+tokens*.000001,"web_search"
-    return 1+max(0,math.ceil((tokens-5000)/5000)),.003+tokens*.000001,"text"
-def reserve_company_usage(db:Session,user:User,message:str,attached:list[File])->tuple[int,float,str]:
-    if user.role=="superadmin":
-        _,cost,route=estimate_charge(message,attached); return 0,cost,route
-    company=db.scalar(select(Company).where(Company.id==user.company_id).with_for_update()); credits,cost,route=estimate_charge(message,attached); plan=PLANS.get(company.plan,PLANS["free"])
-    if company.credit_balance<credits: raise HTTPException(402,{"code":"credits_exhausted","message":"Seus créditos terminaram. Faça upgrade para continuar.","required":credits,"remaining":company.credit_balance})
-    if company.api_budget_used+cost>plan["api_budget"]: raise HTTPException(402,{"code":"budget_exhausted","message":"O orçamento de API do plano foi atingido. Faça upgrade para continuar.","estimated_cost":cost,"remaining":round(plan["api_budget"]-company.api_budget_used,4)})
-    company.credit_balance-=credits; company.api_budget_used+=cost; return credits,cost,route
+        fallback=.012+.006*volume; return 3+volume,catalog_cost("document",fallback,input_tokens=tokens+volume*10000,output_tokens=3500),"document"
+    if re.search(r"\b(raciocínio|matemática|lógica|otimização|calcule|demonstre)\b",text): return 4+max(0,math.ceil((tokens-3000)/3000)),catalog_cost("reasoning",.02+tokens*.000002,tokens,4000),"reasoning"
+    if re.search(r"\b(código|programação|python|javascript|typescript|react|sql|docker|debug)\b",text): return 3+max(0,math.ceil((tokens-5000)/5000)),catalog_cost("code",.012+tokens*.0000015,tokens,3000),"code"
+    if re.search(r"\b(pesquise|internet|notícia|hoje|agora|preço|cotação|clima|placar)\b",text): return 2+max(0,math.ceil((tokens-5000)/5000)),catalog_cost("web_search",.01+tokens*.000001,tokens,3500),"web_search"
+    return 1+max(0,math.ceil((tokens-5000)/5000)),catalog_cost("text",.003+tokens*.000001,tokens,1500),"text"
+def operation_model(route:str)->tuple[str,str]:
+    if route=="image_generation": return ("bfl" if settings.bfl_api_key else "deepinfra"),settings.bfl_image_model if settings.bfl_api_key else settings.image_ai_model
+    if route=="vision": return "deepinfra",settings.vision_ai_model
+    if route=="audio": return "deepinfra",settings.audio_ai_model
+    return "deepinfra",settings.document_ai_model if route=="document" else settings.default_ai_model
+def request_idempotency_key(provided:str|None,owner:str,message:str,file_ids:list[str],conversation_id:str|None)->str:
+    if provided: return hashlib.sha256(f"{owner}:{provided}".encode()).hexdigest()
+    bucket=int(time.time()//30)
+    raw=json.dumps([owner,conversation_id,message,file_ids,bucket],ensure_ascii=False,separators=(",",":"))
+    return hashlib.sha256(raw.encode()).hexdigest()
+def operation_error_code(exc:Exception)->str:
+    if isinstance(exc,(httpx.TimeoutException,asyncio.TimeoutError)): return "provider_timeout"
+    if isinstance(exc,httpx.HTTPStatusError): return f"provider_http_{exc.response.status_code}"
+    if isinstance(exc,HTTPException): return f"http_{exc.status_code}"
+    if isinstance(exc,asyncio.CancelledError): return "cancelled"
+    return "unexpected_error"
+def begin_usage_reservation(user:User,message:str,attached:list[File],idempotency_key:str)->dict:
+    credits,cost,route=estimate_charge(message,attached); provider,model=operation_model(route); started=time.perf_counter()
+    reservation_db=SessionLocal()
+    try:
+        existing=reservation_db.scalar(select(AIUsageReservation).where(AIUsageReservation.idempotency_key==idempotency_key))
+        if existing:
+            return {"id":existing.id,"credits":existing.reserved_credits,"cost":existing.estimated_cost,"route":existing.operation,"provider":existing.provider,"model":existing.model,"status":existing.status,"response":existing.response_payload}
+        db_user=reservation_db.get(User,user.id)
+        final_credits=0 if db_user.role=="superadmin" else credits
+        if db_user.role!="superadmin":
+            company=reservation_db.scalar(select(Company).where(Company.id==db_user.company_id).with_for_update()); plan=PLANS.get(company.plan,PLANS["free"])
+            if company.credit_balance<credits: raise HTTPException(402,{"code":"credits_exhausted","message":"Seus créditos terminaram. Faça upgrade para continuar.","required":credits,"remaining":company.credit_balance})
+            if company.api_budget_used+cost>plan["api_budget"]: raise HTTPException(402,{"code":"budget_exhausted","message":"O orçamento de API do plano foi atingido. Faça upgrade para continuar.","estimated_cost":cost,"remaining":round(plan["api_budget"]-company.api_budget_used,4)})
+            company.credit_balance-=credits; company.api_budget_used+=cost
+        item=AIUsageReservation(idempotency_key=idempotency_key,company_id=db_user.company_id,user_id=db_user.id,provider=provider,model=model,operation=route,estimated_cost=cost,reserved_credits=final_credits,final_credits=0,status="reserved")
+        reservation_db.add(item); reservation_db.flush()
+        add_usage_ledger(reservation_db,user=db_user,provider=provider,model=model,request_id=None,operation=route,estimated_cost=cost,actual_cost=None,reserved_credits=final_credits,final_credits=0,status="reserved",started_at=started,reservation_id=item.id,idempotency_key=idempotency_key)
+        reservation_db.commit()
+        return {"id":item.id,"credits":final_credits,"cost":cost,"route":route,"provider":provider,"model":model,"status":"reserved","response":None}
+    except IntegrityError:
+        reservation_db.rollback()
+        existing=reservation_db.scalar(select(AIUsageReservation).where(AIUsageReservation.idempotency_key==idempotency_key))
+        if existing: return {"id":existing.id,"credits":existing.reserved_credits,"cost":existing.estimated_cost,"route":existing.operation,"provider":existing.provider,"model":existing.model,"status":existing.status,"response":existing.response_payload}
+        raise
+    finally: reservation_db.close()
+def begin_anonymous_reservation(device_hash:str,ip_hash:str,message:str,idempotency_key:str)->dict:
+    credits,cost,route=estimate_charge(message,[]); provider,model=operation_model(route); started=time.perf_counter(); reservation_db=SessionLocal()
+    try:
+        existing=reservation_db.scalar(select(AIUsageReservation).where(AIUsageReservation.idempotency_key==idempotency_key))
+        if existing: return {"id":existing.id,"credits":existing.reserved_credits,"cost":existing.estimated_cost,"route":existing.operation,"provider":existing.provider,"model":existing.model,"status":existing.status,"response":existing.response_payload}
+        allowance=reservation_db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash).with_for_update())
+        if not allowance:
+            if (reservation_db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3: raise HTTPException(402,{"code":"login_required","message":"O limite gratuito deste local foi utilizado. Crie uma conta para continuar."})
+            allowance=AnonymousAllowance(device_hash=device_hash,ip_hash=ip_hash,credit_balance=100,api_budget_used=0); reservation_db.add(allowance); reservation_db.flush()
+        if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
+        allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
+        item=AIUsageReservation(idempotency_key=idempotency_key,anonymous_device_hash=device_hash,provider=provider,model=model,operation=route,estimated_cost=cost,reserved_credits=credits,final_credits=0,status="reserved")
+        reservation_db.add(item); reservation_db.flush()
+        add_usage_ledger(reservation_db,user=None,provider=provider,model=model,request_id=None,operation=route,estimated_cost=cost,actual_cost=None,reserved_credits=credits,final_credits=0,status="reserved",started_at=started,anonymous_device_hash=device_hash,reservation_id=item.id,idempotency_key=idempotency_key)
+        reservation_db.commit()
+        return {"id":item.id,"credits":credits,"cost":cost,"route":route,"provider":provider,"model":model,"status":"reserved","response":None}
+    finally: reservation_db.close()
+def transition_usage_reservation(reservation_id:str,status:str,*,actual_cost:float|None=None,provider:str|None=None,model:str|None=None,request_id:str|None=None,response:dict|None=None,error_code:str|None=None,refund:bool=False):
+    transition_db=SessionLocal(); started=time.perf_counter()
+    try:
+        item=transition_db.scalar(select(AIUsageReservation).where(AIUsageReservation.id==reservation_id).with_for_update())
+        if not item or item.status in {"succeeded","refunded","cancelled","provider_completed_client_disconnected"}: return
+        db_user=transition_db.get(User,item.user_id) if item.user_id else None
+        if refund:
+            if item.company_id and item.reserved_credits:
+                company=transition_db.scalar(select(Company).where(Company.id==item.company_id).with_for_update())
+                company.credit_balance+=item.reserved_credits; company.api_budget_used=max(0,float(company.api_budget_used)-float(item.estimated_cost))
+            elif item.anonymous_device_hash and item.reserved_credits:
+                allowance=transition_db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==item.anonymous_device_hash).with_for_update())
+                if allowance: allowance.credit_balance+=item.reserved_credits; allowance.api_budget_used=max(0,float(allowance.api_budget_used)-float(item.estimated_cost)); allowance.updated_at=datetime.now(timezone.utc)
+            final_credits=0; final_cost=0
+        else:
+            final_credits=0 if status in {"reserved","processing"} else item.reserved_credits; final_cost=effective_cost(item.estimated_cost,actual_cost)
+            if item.company_id and db_user and db_user.role!="superadmin":
+                company=transition_db.scalar(select(Company).where(Company.id==item.company_id).with_for_update())
+                company.api_budget_used=max(0,float(company.api_budget_used)+(final_cost-float(item.estimated_cost)))
+            elif item.anonymous_device_hash and status not in {"reserved","processing"}:
+                allowance=transition_db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==item.anonymous_device_hash).with_for_update())
+                if allowance: allowance.api_budget_used=max(0,float(allowance.api_budget_used)+(final_cost-float(item.estimated_cost))); allowance.updated_at=datetime.now(timezone.utc)
+        item.status=status; item.actual_cost=actual_cost; item.final_credits=final_credits; item.provider=provider or item.provider; item.model=model or item.model; item.provider_request_id=request_id or item.provider_request_id; item.response_payload=response; item.error_code=error_code; item.updated_at=datetime.now(timezone.utc)
+        if status not in {"reserved","processing"}: item.finalized_at=datetime.now(timezone.utc)
+        add_usage_ledger(transition_db,user=db_user,provider=item.provider,model=item.model,request_id=item.provider_request_id,operation=item.operation,estimated_cost=item.estimated_cost,actual_cost=actual_cost,reserved_credits=item.reserved_credits,final_credits=final_credits,status=status,started_at=started,error_code=error_code,anonymous_device_hash=item.anonymous_device_hash,reservation_id=item.id,idempotency_key=item.idempotency_key)
+        transition_db.commit()
+    finally: transition_db.close()
 SPECIALIST_AGENTS=[
     ("Marketing","Estratégia, marca, conteúdo, mídia, SEO e crescimento","Você é um diretor de Marketing sênior. Domina posicionamento, branding, pesquisa de mercado, ICP, jornada, copywriting, conteúdo, SEO, mídia paga, CRM, analytics, funis, CAC, LTV e experimentação. Entregue estratégias executáveis, métricas, cronogramas e exemplos alinhados ao negócio."),
     ("Recursos Humanos","Cultura, talentos, desempenho e desenvolvimento","Você é um executivo de Recursos Humanos especialista em recrutamento, seleção por competências, employer branding, cultura, clima, desempenho, cargos e salários, treinamento, liderança, people analytics e retenção. Produza políticas e planos práticos, inclusivos e mensuráveis."),
@@ -512,6 +644,25 @@ def resume_pending_rag_indexes():
     try: pending=db.scalars(select(File.id).where(File.index_status=="pending",File.mime_type.in_(INDEXABLE_MIMES)).limit(1000)).all()
     finally: db.close()
     for file_id in pending: queue_index(file_id)
+@app.on_event("startup")
+def seed_provider_prices():
+    db=SessionLocal()
+    try:
+        if db.scalar(select(func.count()).select_from(ProviderPrice)): return
+        now_value=datetime.now(timezone.utc)
+        defaults=[
+            ("deepinfra",settings.default_ai_model,"text",1.0,1.0,0,0),
+            ("deepinfra",settings.document_ai_model,"text",1.5,2.0,0,0),
+            ("deepinfra",settings.vision_ai_model,"text",2.0,2.0,0,0),
+            ("deepinfra",settings.audio_ai_model,"audio",0,0,0,.006),
+            ("deepinfra",settings.noisy_audio_ai_model,"audio",0,0,0,.012),
+            ("deepinfra",settings.image_ai_model,"image",0,0,.10,0),
+            ("bfl",settings.bfl_image_model,"image",0,0,.10,0),
+        ]
+        for provider,model,operation,input_price,output_price,image_price,audio_price in defaults:
+            db.add(ProviderPrice(provider=provider,model=model,operation=operation,input_token_price=input_price,output_token_price=output_price,image_price=image_price,audio_minute_price=audio_price,currency="BRL",valid_from=now_value))
+        db.commit()
+    finally: db.close()
 def refresh_pair(user,db,request:Request|None=None):
     raw=random_token(); agent=request.headers.get("user-agent","")[:500] if request else ""; ip=request.client.host if request and request.client else None
     device=("Celular" if re.search(r"mobile|android|iphone",agent,re.I) else "Computador")+" — "+(re.search(r"(Chrome|Firefox|Safari|Edge|Edg)/[\d.]+",agent).group(0) if re.search(r"(Chrome|Firefox|Safari|Edge|Edg)/[\d.]+",agent) else "Navegador")
@@ -571,6 +722,26 @@ async def refresh(data:Refresh,request:Request,db:Session=Depends(get_db)):
     item.revoked=True; item.last_used_at=datetime.now(timezone.utc); user=db.get(User,item.user_id)
     if not user or user.status!="active": raise HTTPException(401,"Usuário inativo")
     db.commit(); return refresh_pair(user,db,request)
+@app.post(API+"/auth/password/forgot")
+async def forgot_password(data:PasswordForgotIn,request:Request,db:Session=Depends(get_db)):
+    await enforce_rate_limit("password_forgot_ip",request_ip(request),5,3600)
+    await enforce_rate_limit("password_forgot_account",data.email.strip().lower(),3,3600)
+    account=db.scalar(select(User).where(func.lower(User.email)==data.email.strip().lower(),User.status=="active"))
+    if account: issue_password_reset(db,account,request)
+    return {"message":"Se existir uma conta ativa para este e-mail, enviaremos um link válido por 15 minutos."}
+@app.post(API+"/auth/password/reset")
+async def reset_password(data:PasswordResetIn,request:Request,db:Session=Depends(get_db)):
+    await enforce_rate_limit("password_reset_ip",request_ip(request),10,3600)
+    now_value=datetime.now(timezone.utc)
+    item=db.scalar(select(PasswordResetToken).where(PasswordResetToken.token_hash==token_hash(data.token),PasswordResetToken.used_at==None).with_for_update())
+    if not item or item.expires_at.replace(tzinfo=timezone.utc)<=now_value: raise HTTPException(400,"Link inválido, expirado ou já utilizado")
+    account=db.get(User,item.user_id)
+    if not account or account.status!="active": raise HTTPException(400,"Conta indisponível")
+    account.password_hash=hash_password(data.password); account.token_version+=1; item.used_at=now_value
+    db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id))
+    for other in db.scalars(select(PasswordResetToken).where(PasswordResetToken.user_id==account.id,PasswordResetToken.used_at==None)).all(): other.used_at=now_value
+    add_admin_audit(db,request,"password_reset_completed",target=account,details={"self_service":True})
+    db.commit(); return {"message":"Senha redefinida. Entre novamente em todos os dispositivos."}
 @app.get(API+"/me")
 def me(user=Depends(current_user),db:Session=Depends(get_db)):
     company=db.get(Company,user.company_id) if user.company_id else None
@@ -649,49 +820,52 @@ def delete_account(user=Depends(current_user),db:Session=Depends(get_db)):
     user.name="Conta excluída"; user.preferred_name=None; user.custom_instructions=None; user.avatar=None; user.email=f"deleted-{user.id}@invalid.local"; user.password_hash=hash_password(secrets.token_urlsafe(48)); user.status="deleted"; user.token_version+=1; db.commit()
     return {"message":"Conta e dados pessoais excluídos"}
 @app.get(API+"/dashboard")
-def dashboard(user=Depends(current_user),db:Session=Depends(get_db)):
+def dashboard(request:Request,user=Depends(current_user),db:Session=Depends(get_db)):
     if user.role=="superadmin":
         usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0))).one()
         counts={"users":db.scalar(select(func.count()).select_from(User)),"agents":db.scalar(select(func.count()).select_from(Agent)),"conversations":db.scalar(select(func.count()).select_from(Conversation)),"files":db.scalar(select(func.count()).select_from(File)),"companies":db.scalar(select(func.count()).select_from(Company))}
-        return {"company":{"name":"Administração da plataforma","plan":"Ilimitado","status":"active","credit_balance":999999999,"api_budget_used":0},"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":{**PLANS["enterprise"],"credits":999999999,"api_budget":999999999},"is_superadmin":True}
+        result={"company":{"name":"Administração da plataforma","plan":"Ilimitado","status":"active","credit_balance":999999999,"api_budget_used":0},"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":{**PLANS["enterprise"],"credits":999999999,"api_budget":999999999},"is_superadmin":True}
+        add_admin_audit(db,request,"financial_dashboard_viewed",user,details={"total_cost":round(usage[1],4)}); db.commit(); return result
+    cid=user.company_id; company=db.get(Company,cid); usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0)).where(UsageLog.company_id==cid)).one()
+    counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
+    return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}
 @app.get(API+"/admin/users")
 def admin_users(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     rows=db.execute(select(User,Company).outerjoin(Company,Company.id==User.company_id).order_by(User.created_at.desc()).limit(1000)).all()
     return [{**dump(account),"company":{"id":company.id,"name":company.name,"plan":company.plan,"status":company.status,"credit_balance":company.credit_balance,"api_budget_used":company.api_budget_used} if company else None} for account,company in rows]
 @app.patch(API+"/admin/users/{user_id}")
-def admin_update_user(user_id:str,data:AdminUserUpdate,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+def admin_update_user(user_id:str,data:AdminUserUpdate,request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     account=db.get(User,user_id)
     if not account: raise HTTPException(404,"Usuário não encontrado")
+    before={"name":account.name,"email":account.email,"status":account.status,"role":account.role}
+    company_before=db.get(Company,account.company_id) if account.company_id else None; before["plan"]=company_before.plan if company_before else None
     values=data.model_dump(exclude_unset=True); plan=values.pop("plan",None); password=values.pop("password",None)
+    if password: raise HTTPException(400,"Use o fluxo seguro de redefinição por link")
     if values.get("role")=="superadmin" and account.id!=user.id: raise HTTPException(403,"Não é permitido criar outro superadministrador por esta tela")
     if values.get("status") not in {None,"active","inactive"}: raise HTTPException(400,"Status inválido")
     for key,value in values.items(): setattr(account,key,value)
-    if password: account.password_hash=hash_password(password); account.token_version+=1; db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id))
+    if values.get("status")=="inactive":
+        account.token_version+=1; db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id))
     if plan:
         if plan not in PLANS: raise HTTPException(400,"Plano inválido")
         company=db.get(Company,account.company_id); company.plan=plan; company.credit_balance=PLANS[plan]["credits"]; company.api_budget_used=0
+    after={"name":account.name,"email":account.email,"status":account.status,"role":account.role,"plan":plan or before["plan"]}
+    changes={key:{"from":before.get(key),"to":value} for key,value in after.items() if before.get(key)!=value}
+    add_admin_audit(db,request,"user_updated",user,target=account,details={"changes":changes})
     db.commit(); return {"message":"Usuário atualizado"}
 @app.post(API+"/admin/users/{user_id}/reset-password")
-def admin_reset_password(user_id:str,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+def admin_reset_password(user_id:str,request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     account=db.get(User,user_id)
     if not account: raise HTTPException(404,"Usuário não encontrado")
-    temporary=secrets.token_urlsafe(10)+"A1!"; account.password_hash=hash_password(temporary); account.token_version+=1; db.execute(delete(RefreshToken).where(RefreshToken.user_id==account.id)); db.commit(); delivered=False
-    if settings.smtp_host and settings.smtp_user and settings.smtp_password:
-        try:
-            message=EmailMessage(); message["Subject"]="Sua nova senha temporária — SolvitSoft IA"; message["From"]=settings.smtp_from or settings.smtp_user; message["To"]=account.email; message.set_content(f"Olá, {account.name}.\n\nSua senha temporária é:\n\n{temporary}\n\nEntre em {settings.frontend_url}/login e altere sua senha assim que possível. Todas as sessões anteriores foram desconectadas.")
-            with smtplib.SMTP(settings.smtp_host,settings.smtp_port,timeout=20) as smtp: smtp.starttls(); smtp.login(settings.smtp_user,settings.smtp_password); smtp.send_message(message)
-            delivered=True
-        except Exception as exc: logger.error("Password email failed for user %s: %s",account.id,exc)
-    return {"temporary_password":temporary,"email":account.email,"delivered":delivered,"message":"Senha temporária criada e sessões anteriores desconectadas"}
-    cid=user.company_id; company=db.get(Company,cid); usage=db.execute(select(func.coalesce(func.sum(UsageLog.input_tokens+UsageLog.output_tokens),0),func.coalesce(func.sum(UsageLog.cost),0)).where(UsageLog.company_id==cid)).one()
-    counts={k:db.scalar(select(func.count()).select_from(m).where(m.company_id==cid)) for k,m in {"users":User,"agents":Agent,"conversations":Conversation,"files":File}.items()}
-    return {"company":dump(company),"counts":counts,"usage":{"tokens":usage[0],"cost":round(usage[1],4)},"limits":PLANS.get(company.plan,PLANS["starter"])}
+    delivered=issue_password_reset(db,account,request,user)
+    return {"email":account.email,"delivered":delivered,"message":"Link de redefinição criado e enviado por e-mail." if delivered else "Link criado, mas o SMTP não conseguiu entregar o e-mail. Verifique a configuração e tente novamente."}
 @app.get(API+"/admin/training/stats")
 def training_stats(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     return {"samples":db.scalar(select(func.count()).select_from(TrainingSample)) or 0,"contributors":db.scalar(select(func.count(func.distinct(TrainingSample.user_id)))) or 0}
 @app.get(API+"/admin/training/export")
-def export_training(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+def export_training(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     rows=db.scalars(select(TrainingSample).order_by(TrainingSample.created_at).limit(100000)).all()
+    add_admin_audit(db,request,"training_data_exported",user,details={"rows":len(rows)}); db.commit()
     def stream():
         for row in rows:
             yield json.dumps({"messages":[{"role":"user","content":row.prompt},{"role":"assistant","content":row.response}],"metadata":{"category":row.category,"model":row.model}},ensure_ascii=False)+"\n"
@@ -812,7 +986,7 @@ def reindex_file(item_id:str,user=Depends(current_user),db:Session=Depends(get_d
     if user.role not in {"owner","admin","superadmin"} and item.user_id!=user.id: raise HTTPException(403,"Sem permissão para reindexar este arquivo")
     if item.mime_type not in INDEXABLE_MIMES: raise HTTPException(400,"Este tipo de arquivo não pode ser indexado")
     item.index_status="pending"; item.index_error=None; db.commit(); task_id=queue_index(item.id,strict=True); return {"file_id":item.id,"status":"pending","task_id":task_id}
-async def ai_answer(data:ChatIn,user,db,on_delta=None):
+async def ai_answer(data:ChatIn,user,db,on_delta=None,billing:dict|None=None):
     operation_started=time.perf_counter()
     if data.folder_id: tenant_get(db,Folder,data.folder_id,user)
     conv=tenant_get(db,Conversation,data.conversation_id,user) if data.conversation_id else Conversation(company_id=user.company_id,user_id=user.id,agent_id=data.agent_id,folder_id=data.folder_id,title=data.message[:70])
@@ -832,7 +1006,8 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
     attached=[]
     if data.file_ids:
         attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)]
-    charged_credits,estimated_api_cost,estimated_route=reserve_company_usage(db,user,data.message,attached)
+    if not billing: raise HTTPException(500,"Reserva financeira ausente")
+    charged_credits,estimated_api_cost,estimated_route=billing["credits"],billing["cost"],billing["route"]
     db.add(Message(conversation_id=conv.id,role="user",content=data.message)); db.flush()
     memory_pattern=re.compile(r"\b(meu nome é|pode me chamar de|eu gosto de|eu prefiro|prefiro|não gosto de|eu trabalho com|minha empresa (?:é|se chama)|sempre responda|quero que você)\b[^.!?\n]{2,220}",re.IGNORECASE)
     for match in memory_pattern.finditer(data.message) if user.memory_enabled else []:
@@ -847,7 +1022,7 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
         structure_prompt=f"""Crie o conteúdo completo solicitado para um arquivo .{requested_extension}. Retorne somente JSON válido com esta estrutura abrangente: {{"filename":"nome.{requested_extension}","title":"Título","subtitle":"Subtítulo opcional","sections":[{{"heading":"Seção","paragraphs":["Parágrafo"],"bullets":["Item"],"table":{{"headers":["Coluna"],"rows":[["Valor"]]}}}}],"slides":[{{"title":"Slide","bullets":["Item"]}}],"sheets":[{{"name":"Dados","headers":["Coluna"],"rows":[["Valor"]]}}],"text":"conteúdo textual integral quando for arquivo de texto ou código","data":{{"chave":"valor"}}}}. Preencha as propriedades adequadas ao formato e à solicitação. Não use Markdown fora dos valores JSON."""
         async with httpx.AsyncClient(timeout=120) as client:
             response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":generation_model,"messages":[{"role":"system","content":structure_prompt},{"role":"user","content":data.message}],"temperature":.25,"max_tokens":max(5000,generation_limit),"response_format":{"type":"json_object"}},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-        response.raise_for_status(); result=response.json(); request_id,actual_cost=provider_metadata(result,response.headers); spec=content_spec(result["choices"][0]["message"]["content"])
+        response.raise_for_status(); result=response.json(); request_id,actual_cost=provider_metadata(result,response.headers); mark_provider_completed(billing["id"],"deepinfra",generation_model,request_id,actual_cost); spec=content_spec(result["choices"][0]["message"]["content"])
         requested_name=pathlib.Path(str(spec.get("filename") or f"arquivo.{requested_extension}")).name
         safe_stem=re.sub(r"[^\w .-]","_",pathlib.Path(requested_name).stem,flags=re.UNICODE).strip(" .") or "arquivo"
         safe_name=f"{safe_stem}.{requested_extension}"; output_path=pathlib.Path("storage")/user.company_id/"generated"/f"{secrets.token_hex(16)}.{requested_extension}"
@@ -855,18 +1030,18 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
         generated=File(company_id=user.company_id,user_id=user.id,name=safe_name,path=str(output_path),mime_type=FILE_MIMES[requested_extension],size=output_path.stat().st_size)
         db.add(generated); db.flush(); answer=f"Pronto — criei o arquivo **{safe_name}** conforme solicitado.\n\n[Baixar {safe_name}](/api/v1/files/{generated.id}/download)"
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
-        final_cost=effective_cost(estimated_api_cost,actual_cost); reconcile_company_cost(db,user,estimated_api_cost,actual_cost)
+        final_cost=effective_cost(estimated_api_cost,actual_cost)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=generation_model,input_tokens=inp,output_tokens=out,cost=final_cost,credits=charged_credits))
-        add_usage_ledger(db,user=user,provider="deepinfra",model=generation_model,request_id=request_id,operation="file_generation",estimated_cost=estimated_api_cost,actual_cost=actual_cost,reserved_credits=charged_credits,final_credits=charged_credits,status="succeeded",started_at=operation_started); db.commit()
+        db.commit()
         if generated.mime_type in INDEXABLE_MIMES: queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":generation_model,"route":"file_generation","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False}
+        return {"conversation_id":conv.id,"message":answer,"model":generation_model,"route":"file_generation","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False,"_billing":{"provider":"deepinfra","request_id":request_id,"actual_cost":actual_cost}}
     spreadsheet_intent=bool(re.search(r"\b(crie|criar|gere|gerar|faça|produza|monte)\b.{0,80}\b(planilha|excel|xlsx)\b|\b(planilha|excel|xlsx)\b.{0,80}\b(crie|criar|gere|gerar|faça|produza|monte)\b",data.message.lower()))
     if spreadsheet_intent and not attached:
         if not settings.deepinfra_api_key: raise HTTPException(503,"Configure DEEPINFRA_API_KEY para gerar planilhas")
         structure_prompt="""Converta a solicitação do usuário em uma planilha Excel útil e completa. Retorne somente JSON válido neste formato: {"filename":"nome.xlsx","sheets":[{"name":"Nome da aba","headers":["Coluna 1","Coluna 2"],"rows":[["valor 1","valor 2"]]}]}. Use valores numéricos como números, booleanos como booleanos e fórmulas Excel iniciadas por = quando forem úteis. Inclua todo o conteúdo solicitado, com cabeçalhos claros. Não use Markdown."""
         async with httpx.AsyncClient(timeout=120) as client:
             response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":settings.default_ai_model,"messages":[{"role":"system","content":structure_prompt},{"role":"user","content":data.message}],"temperature":.2,"max_tokens":4000,"response_format":{"type":"json_object"}},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-        response.raise_for_status(); result=response.json(); request_id,actual_cost=provider_metadata(result,response.headers); spec=spreadsheet_spec(result["choices"][0]["message"]["content"])
+        response.raise_for_status(); result=response.json(); request_id,actual_cost=provider_metadata(result,response.headers); mark_provider_completed(billing["id"],"deepinfra",settings.default_ai_model,request_id,actual_cost); spec=spreadsheet_spec(result["choices"][0]["message"]["content"])
         requested_name=pathlib.Path(str(spec.get("filename") or "planilha.xlsx")).name
         safe_name=re.sub(r"[^\w .-]","_",requested_name,flags=re.UNICODE).strip(" .") or "planilha.xlsx"
         if not safe_name.lower().endswith(".xlsx"): safe_name+=".xlsx"
@@ -876,23 +1051,23 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
         db.add(generated); db.flush()
         answer=f"Pronto — criei a planilha **{safe_name}** conforme solicitado.\n\n[Baixar {safe_name}](/api/v1/files/{generated.id}/download)"
         usage=result.get("usage",{}); inp=usage.get("prompt_tokens",0); out=usage.get("completion_tokens",0)
-        final_cost=effective_cost(estimated_api_cost,actual_cost); reconcile_company_cost(db,user,estimated_api_cost,actual_cost)
+        final_cost=effective_cost(estimated_api_cost,actual_cost)
         db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=settings.default_ai_model,input_tokens=inp,output_tokens=out,cost=final_cost,credits=charged_credits))
-        add_usage_ledger(db,user=user,provider="deepinfra",model=settings.default_ai_model,request_id=request_id,operation="spreadsheet",estimated_cost=estimated_api_cost,actual_cost=actual_cost,reserved_credits=charged_credits,final_credits=charged_credits,status="succeeded",started_at=operation_started); db.commit(); queue_index(generated.id)
-        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False}
+        db.commit(); queue_index(generated.id)
+        return {"conversation_id":conv.id,"message":answer,"model":settings.default_ai_model,"route":"spreadsheet","module":"text_documents","image":None,"usage":{"input":inp,"output":out},"streamed":False,"_billing":{"provider":"deepinfra","request_id":request_id,"actual_cost":actual_cost}}
     image_intent=is_image_generation_request(data.message)
     if image_intent and not attached:
-        if not settings.deepinfra_api_key and not settings.bfl_api_key: answer="Configure DEEPINFRA_API_KEY para gerar imagens."; image_data=None
+        if not settings.deepinfra_api_key and not settings.bfl_api_key: raise HTTPException(503,"Configure um provedor para gerar imagens.")
         else:
-            encoded,image_model,image_provider,request_id,actual_cost=await generate_image_b64(data.message); raw=base64.b64decode(encoded); image_data=True; answer="Imagem criada conforme sua solicitação."
+            encoded,image_model,image_provider,request_id,actual_cost=await generate_image_b64(data.message,billing["id"]); mark_provider_completed(billing["id"],image_provider,image_model,request_id,actual_cost); raw=base64.b64decode(encoded); image_data=True; answer="Imagem criada conforme sua solicitação."
             suffix=".jpg" if raw.startswith(b"\xff\xd8\xff") else ".png"
             image_root=pathlib.Path("storage")/user.company_id/"generated"; image_root.mkdir(parents=True,exist_ok=True); image_path=image_root/f"{secrets.token_hex(16)}{suffix}"; image_path.write_bytes(raw)
         assistant_message=Message(conversation_id=conv.id,role="assistant",content=answer,image_path=str(image_path) if image_data else None)
-        final_cost=effective_cost(estimated_api_cost,actual_cost if image_data else None); reconcile_company_cost(db,user,estimated_api_cost,actual_cost if image_data else None)
+        final_cost=effective_cost(estimated_api_cost,actual_cost if image_data else None)
         db.add(assistant_message); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=image_model if image_data else settings.image_ai_model,input_tokens=0,output_tokens=0,cost=final_cost,credits=charged_credits))
-        add_usage_ledger(db,user=user,provider=image_provider if image_data else "unconfigured",model=image_model if image_data else settings.image_ai_model,request_id=request_id if image_data else None,operation="image_generation",estimated_cost=estimated_api_cost,actual_cost=actual_cost if image_data else None,reserved_credits=charged_credits,final_credits=charged_credits,status="succeeded" if image_data else "failed",started_at=operation_started,error_code=None if image_data else "provider_unconfigured"); db.commit()
+        db.commit()
         image_url=f"/messages/{assistant_message.id}/image" if image_data else None
-        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","module":"images","image":image_url,"usage":{"input":0,"output":0},"streamed":False}
+        return {"conversation_id":conv.id,"message":answer,"model":image_model if image_data else settings.image_ai_model,"route":"image_generation","module":"images","image":image_url,"usage":{"input":0,"output":0},"streamed":False,"_billing":{"provider":image_provider,"request_id":request_id,"actual_cost":actual_cost}}
     rag_hits=[]
     if not attached and settings.deepinfra_api_key:
         ready_query=select(File.id).outerjoin(Folder,Folder.id==File.folder_id).where(File.company_id==user.company_id,File.index_status=="ready")
@@ -944,7 +1119,7 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
         if meeting_intent and settings.mistral_api_key:
             meeting_context=[]
             for item in audio_files:
-                transcript,tone_report=await analyze_meeting_audio(item)
+                transcript,tone_report=await analyze_meeting_audio(item,billing["id"])
                 meeting_context.append(f"ARQUIVO: {item.name}\n\nTRANSCRIÇÃO POR FALANTE:\n{transcript}\n\nANÁLISE ACÚSTICA E DA REUNIÃO:\n{tone_report}")
             api_messages[0]["content"]+="\n\nUse a análise de reunião abaixo como fonte. Preserve os rótulos dos falantes, timestamps, ressalvas e níveis de confiança. Não transforme estimativas de tom em fatos psicológicos nem identifique pessoas pela voz.\n\n"+"\n\n".join(meeting_context)
         else:
@@ -952,7 +1127,9 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
             async with httpx.AsyncClient(timeout=300) as client:
                 for item in audio_files:
                     encoded=base64.b64encode(pathlib.Path(item.path).read_bytes()).decode(); response=await client.post(f"{settings.deepinfra_native_url}/{audio_model}",json={"audio":f"data:{item.mime_type};base64,{encoded}","task":"transcribe","language":"pt"},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
-                    if response.is_error: logger.error("DeepInfra transcription failed status=%s body=%s",response.status_code,response.text[:1000]); raise HTTPException(502,"Não foi possível transcrever o áudio")
+                    if response.is_error:
+                        append_reservation_event(billing["id"],"dependency_failed",f"transcription_http_{response.status_code}",provider="deepinfra",model=audio_model)
+                        logger.error("DeepInfra transcription failed status=%s body=%s",response.status_code,response.text[:1000]); raise HTTPException(502,"Não foi possível transcrever o áudio")
                     transcripts.append(response.json().get("text", ""))
             api_messages[0]["content"]+="\n\nTranscrição integral do áudio anexado:\n"+"\n".join(transcripts)
             if meeting_intent: api_messages[0]["content"]+="\n\nA separação confiável de participantes e a análise acústica de tom exigem MISTRAL_API_KEY. Não invente falantes ou tons; informe essa limitação."
@@ -981,6 +1158,7 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
                 api_messages[0]["content"]+=f"\n\nA data e hora atual no Brasil é {now_br.isoformat()}. Foi realizada uma pesquisa na internet para esta pergunta. Responda com base nas fontes abaixo, compare divergências, não invente e inclua links Markdown para as fontes usadas junto às afirmações. Ao final, crie uma seção curta intitulada 'Fontes'. {live_instruction}\n\nRESUMO DA BUSCA: {search_answer}\n\n{sources}"
             else: web_search=False
         except (httpx.HTTPError,ValueError) as exc:
+            append_reservation_event(billing["id"],"dependency_failed","tavily_search_failed",provider="tavily",model="search")
             logger.warning("Web search failed: %s",exc); web_search=False
     if settings.deepinfra_api_key:
         if web_search:
@@ -1006,28 +1184,43 @@ async def ai_answer(data:ChatIn,user,db,on_delta=None):
             supplement=answer[len(raw_answer):] if answer.startswith(raw_answer) else "\n\n"+answer
             if supplement: await on_delta(supplement)
         inp=usage.get("prompt_tokens",max(1,sum(len(str(item.get("content",""))) for item in api_messages)//4)); out=usage.get("completion_tokens",max(1,len(answer)//4))
+        mark_provider_completed(billing["id"],"deepinfra",model,request_id,actual_cost)
     else: answer="A integração de IA está pronta. Configure DEEPINFRA_API_KEY no ambiente para receber respostas reais."; inp=len(data.message)//4; out=len(answer)//4; streamed=False; request_id=None; actual_cost=None
     route="vision" if images else "document" if documents else "audio" if audio_files else "web_search" if web_search else "text"
-    final_cost=effective_cost(estimated_api_cost,actual_cost); reconcile_company_cost(db,user,estimated_api_cost,actual_cost)
+    final_cost=effective_cost(estimated_api_cost,actual_cost)
     db.add(Message(conversation_id=conv.id,role="assistant",content=answer,tokens=out)); db.add(UsageLog(company_id=user.company_id,user_id=user.id,model=model,input_tokens=inp,output_tokens=out,cost=final_cost,credits=charged_credits))
-    add_usage_ledger(db,user=user,provider="deepinfra",model=model,request_id=request_id,operation=route,estimated_cost=estimated_api_cost,actual_cost=actual_cost,reserved_credits=charged_credits,final_credits=charged_credits,status="succeeded",started_at=operation_started)
     if user.training_opt_in and not attached: db.add(TrainingSample(company_id=user.company_id,user_id=user.id,prompt=anonymize_training_text(data.message),response=anonymize_training_text(answer),model=model,category=route,consented_at=datetime.now(timezone.utc)))
     db.commit()
-    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"module":public_module(route),"image":None,"usage":{"input":inp,"output":out},"streamed":streamed}
+    return {"conversation_id":conv.id,"message":answer,"model":model,"route":route,"module":public_module(route),"image":None,"usage":{"input":inp,"output":out},"streamed":streamed,"_billing":{"provider":"deepinfra","request_id":request_id,"actual_cost":actual_cost}}
 @app.post(API+"/chat")
 async def chat(data:ChatIn,request:Request,user=Depends(current_user),db:Session=Depends(get_db)):
     await enforce_rate_limit("chat",user.id,60,60)
     if is_image_generation_request(data.message): await enforce_rate_limit("image_generation",user.id,6,3600)
-    started_at=time.perf_counter()
+    attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)] if data.file_ids else []
+    key=request_idempotency_key(data.idempotency_key,user.id,data.message,data.file_ids,data.conversation_id)
+    billing=begin_usage_reservation(user,data.message,attached,key)
+    if billing["status"]=="succeeded" and billing["response"]: return billing["response"]
+    if billing["status"]!="reserved": raise HTTPException(409,{"code":"duplicate_request","message":"Esta solicitação já está em processamento ou foi finalizada.","status":billing["status"]})
+    transition_usage_reservation(billing["id"],"processing")
     try:
-        return await ai_answer(data,user,db)
+        result=await ai_answer(data,user,db,billing=billing)
+        metadata=result.pop("_billing",{})
+        transition_usage_reservation(billing["id"],"succeeded",actual_cost=metadata.get("actual_cost"),provider=metadata.get("provider"),model=result.get("model"),request_id=metadata.get("request_id"),response=result)
+        return result
+    except asyncio.CancelledError:
+        db.rollback(); completed=reservation_provider_result(billing["id"])
+        if completed: transition_usage_reservation(billing["id"],"provider_completed_client_disconnected",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="http_client_disconnected")
+        else: transition_usage_reservation(billing["id"],"cancelled",error_code="http_client_disconnected",refund=True)
+        raise
     except Exception as exc:
         db.rollback()
-        attached=[user_file(db,file_id,user) for file_id in dict.fromkeys(data.file_ids)] if data.file_ids else []
-        credits,cost,route=estimate_charge(data.message,attached)
-        status_code=exc.status_code if isinstance(exc,HTTPException) else 500
-        if status_code>=500:
-            record_failed_ledger(company_id=user.company_id,user_id=user.id,provider="deepinfra",model=settings.image_ai_model if route=="image_generation" else settings.default_ai_model,operation=route,estimated_cost=cost,reserved_credits=credits,started_at=started_at,error_code=f"http_{status_code}")
+        error_code=operation_error_code(exc)
+        completed=reservation_provider_result(billing["id"])
+        if completed:
+            transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="provider_completed_"+error_code)
+        else:
+            transition_usage_reservation(billing["id"],"failed",error_code=error_code)
+            transition_usage_reservation(billing["id"],"refunded",error_code=error_code,refund=True)
         raise
 @app.post(API+"/usage/estimate")
 def usage_estimate(data:ChatIn,user=Depends(current_user),db:Session=Depends(get_db)):
@@ -1035,22 +1228,20 @@ def usage_estimate(data:ChatIn,user=Depends(current_user),db:Session=Depends(get
     return {"credits":credits,"estimated_api_cost":round(cost,4),"route":route,"credit_balance":company.credit_balance,"api_budget_remaining":round(plan["api_budget"]-company.api_budget_used,4)}
 @app.post(API+"/anonymous/chat")
 async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends(get_db)):
-    operation_started=time.perf_counter()
+    billing=None
     try:
         device_hash=hashlib.sha256((data.device_id+settings.secret_key).encode()).hexdigest(); ip=request.headers.get("x-forwarded-for",(request.client.host if request.client else "" )).split(",")[0].strip(); ip_hash=hashlib.sha256((ip+settings.secret_key).encode()).hexdigest()
         await enforce_rate_limit("anonymous_chat_ip",ip,20,60)
         await enforce_rate_limit("anonymous_chat_device",device_hash,20,60)
         if is_image_generation_request(data.message): await enforce_rate_limit("anonymous_image",device_hash,5,3600)
-        allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash).with_for_update())
-        if not allowance:
-            if (db.scalar(select(func.count()).select_from(AnonymousAllowance).where(AnonymousAllowance.ip_hash==ip_hash)) or 0)>=3: raise HTTPException(402,{"code":"login_required","message":"O limite gratuito deste local foi utilizado. Crie uma conta para continuar."})
-            allowance=AnonymousAllowance(device_hash=device_hash,ip_hash=ip_hash,credit_balance=100,api_budget_used=0); db.add(allowance); db.flush()
-        credits,cost,route=estimate_charge(data.message,[])
-        if allowance.credit_balance<credits or allowance.api_budget_used+cost>.50: raise HTTPException(402,{"code":"login_required","message":"Seu uso gratuito terminou. Entre ou crie uma conta para continuar.","remaining":allowance.credit_balance})
-        allowance.credit_balance-=credits; allowance.api_budget_used+=cost; allowance.updated_at=datetime.now(timezone.utc)
+        key=request_idempotency_key(data.idempotency_key,device_hash,data.message,[],None); billing=begin_anonymous_reservation(device_hash,ip_hash,data.message,key)
+        if billing["status"]=="succeeded" and billing["response"]: return billing["response"]
+        if billing["status"]!="reserved": raise HTTPException(409,{"code":"duplicate_request","message":"Esta solicitação já está em processamento ou foi finalizada.","status":billing["status"]})
+        transition_usage_reservation(billing["id"],"processing")
+        credits,cost,route=billing["credits"],billing["cost"],billing["route"]
         if not settings.deepinfra_api_key and not settings.bfl_api_key: raise HTTPException(503,"IA não configurada")
         if route=="image_generation":
-            encoded,model,provider,request_id,actual_cost=await generate_image_b64(data.message); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
+            encoded,model,provider,request_id,actual_cost=await generate_image_b64(data.message,billing["id"]); raw=base64.b64decode(encoded); mime="image/jpeg" if raw.startswith(b"\xff\xd8\xff") else "image/png"; image=f"data:{mime};base64,"+encoded; answer="Imagem criada conforme sua solicitação."
         else:
             model,output_limit=text_model_and_output_limit(data.message,web_search=route=="web_search"); system=OFFICIAL_PROMPT
             if route=="web_search" and settings.tavily_api_key:
@@ -1058,17 +1249,39 @@ async def anonymous_chat(data:AnonymousChatIn,request:Request,db:Session=Depends
                 if search.is_success: system+="\n\nUse e cite estas fontes atuais:\n"+json.dumps(search.json().get("results",[]),ensure_ascii=False)[:10000]
             async with httpx.AsyncClient(timeout=300) as client: response=await client.post(f"{settings.deepinfra_base_url}/chat/completions",json={"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":data.message}],"max_tokens":output_limit},headers={"Authorization":f"Bearer {settings.deepinfra_api_key}"})
             response.raise_for_status(); result=response.json(); answer=result["choices"][0]["message"]["content"]; image=None; provider="deepinfra"; request_id,actual_cost=provider_metadata(result,response.headers)
-        final_cost=effective_cost(cost,actual_cost); allowance.api_budget_used=max(0,float(allowance.api_budget_used)+(final_cost-cost))
-        add_usage_ledger(db,user=None,provider=provider,model=model,request_id=request_id,operation=route,estimated_cost=cost,actual_cost=actual_cost,reserved_credits=credits,final_credits=credits,status="succeeded",started_at=operation_started,anonymous_device_hash=device_hash)
-        db.commit(); return {"message":answer,"image":image,"module":public_module(route),"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
-    except HTTPException:
-        db.rollback()
+        mark_provider_completed(billing["id"],provider,model,request_id,actual_cost)
+        transition_usage_reservation(billing["id"],"succeeded",actual_cost=actual_cost,provider=provider,model=model,request_id=request_id)
+        db.expire_all(); allowance=db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==device_hash))
+        result_payload={"message":answer,"image":image,"module":public_module(route),"credits_used":credits,"credit_balance":allowance.credit_balance,"api_budget_used":round(allowance.api_budget_used,4),"api_budget_limit":.50}
+        reservation_db=SessionLocal()
+        try:
+            item=reservation_db.get(AIUsageReservation,billing["id"]); item.response_payload=result_payload; reservation_db.commit()
+        finally: reservation_db.close()
+        return result_payload
+    except asyncio.CancelledError:
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if completed: transition_usage_reservation(billing["id"],"provider_completed_client_disconnected",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="anonymous_client_disconnected")
+            else: transition_usage_reservation(billing["id"],"cancelled",error_code="anonymous_client_disconnected",refund=True)
+        raise
+    except HTTPException as exc:
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if completed: transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code=f"provider_completed_http_{exc.status_code}")
+            else:
+                transition_usage_reservation(billing["id"],"failed",error_code=f"http_{exc.status_code}"); transition_usage_reservation(billing["id"],"refunded",error_code=f"http_{exc.status_code}",refund=True)
         raise
     except SQLAlchemyError:
-        db.rollback(); logger.exception("Falha no banco durante chat anônimo")
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if completed: transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="provider_completed_database_error")
+            else: transition_usage_reservation(billing["id"],"failed",error_code="database_error"); transition_usage_reservation(billing["id"],"refunded",error_code="database_error",refund=True)
+        logger.exception("Falha no banco durante chat anônimo")
         raise HTTPException(503,{"code":"service_unavailable","message":"O chat gratuito está temporariamente indisponível. Tente novamente em instantes."})
     except (httpx.HTTPError, KeyError, ValueError):
-        db.rollback(); logger.exception("Falha no provedor de IA durante chat anônimo")
+        if billing:
+            transition_usage_reservation(billing["id"],"failed",error_code="provider_error"); transition_usage_reservation(billing["id"],"refunded",error_code="provider_error",refund=True)
+        logger.exception("Falha no provedor de IA durante chat anônimo")
         raise HTTPException(502,{"code":"ai_provider_error","message":"Não foi possível obter a resposta da IA agora. Seus créditos não foram consumidos; tente novamente."})
 @app.post(API+"/anonymous/status")
 def anonymous_status(data:AnonymousStatusIn,request:Request,db:Session=Depends(get_db)):
@@ -1086,7 +1299,7 @@ async def chat_stream(ws:WebSocket):
     token=ws.query_params.get("token","")
     try: token_payload=jwt.decode(token,settings.secret_key,algorithms=["HS256"]); user_id=token_payload["sub"]
     except (JWTError,KeyError): await ws.close(code=4401); return
-    await ws.accept(); db=SessionLocal(); answer_task=None
+    await ws.accept(); db=SessionLocal(); answer_task=None; billing=None; provider_result=None; provider_metadata_result={}
     try:
         user=db.get(User,user_id)
         if not user or user.status!="active" or token_payload.get("ver",0)!=user.token_version: await ws.close(code=4401); return
@@ -1096,6 +1309,17 @@ async def chat_stream(ws:WebSocket):
             await enforce_rate_limit("chat_ws",user.id,60,60)
             if is_image_generation_request(request_text): await enforce_rate_limit("image_generation",user.id,6,3600)
             request_files=[user_file(db,file_id,user) for file_id in dict.fromkeys(payload.get("file_ids") or [])]
+            chat_data=ChatIn.model_validate(payload)
+            key=request_idempotency_key(chat_data.idempotency_key,user.id,request_text,chat_data.file_ids,chat_data.conversation_id)
+            billing=begin_usage_reservation(user,request_text,request_files,key)
+            if billing["status"]=="succeeded" and billing["response"]:
+                cached=billing["response"]
+                await ws.send_json({"type":"delta","content":cached.get("message","")})
+                await ws.send_json({"type":"done","conversation_id":cached.get("conversation_id"),"model":cached.get("model"),"route":cached.get("route"),"module":cached.get("module"),"image":cached.get("image"),"usage":cached.get("usage",{})})
+                billing=None; continue
+            if billing["status"]!="reserved":
+                await ws.send_json({"type":"error","content":"Esta solicitação já está em processamento ou foi finalizada."}); continue
+            transition_usage_reservation(billing["id"],"processing")
             has_audio=any(item.mime_type in AUDIO_MIMES for item in request_files)
             has_images=any(item.mime_type.startswith("image/") for item in request_files)
             if has_audio:
@@ -1108,7 +1332,7 @@ async def chat_stream(ws:WebSocket):
             if settings.tavily_api_key and re.search(r"\b(hoje|agora|placar|resultado|jogo|partida|campeonato|copa|notícia|preço|cotação|clima|atual|pesquise|internet)\b",request_text.lower()): await ws.send_json({"type":"status","content":"Módulo de texto e documentos: pesquisando informações atualizadas...","module":"text_documents"})
             async def forward_delta(content:str):
                 await ws.send_json({"type":"delta","content":content})
-            answer_task=asyncio.create_task(ai_answer(ChatIn.model_validate(payload),user,db,on_delta=forward_delta))
+            answer_task=asyncio.create_task(ai_answer(chat_data,user,db,on_delta=forward_delta,billing=billing))
             control_task=asyncio.create_task(ws.receive_json())
             finished,_=await asyncio.wait({answer_task,control_task},return_when=asyncio.FIRST_COMPLETED)
             if control_task in finished:
@@ -1117,28 +1341,55 @@ async def chat_stream(ws:WebSocket):
                     answer_task.cancel()
                     with suppress(asyncio.CancelledError): await answer_task
                     db.rollback()
+                    completed=reservation_provider_result(billing["id"])
+                    if completed: transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="provider_completed_user_cancelled")
+                    else: transition_usage_reservation(billing["id"],"cancelled",error_code="user_cancelled",refund=True)
+                    billing=None
                     await ws.send_json({"type":"stopped"})
                     continue
             control_task.cancel()
             with suppress(asyncio.CancelledError): await control_task
-            result=await answer_task
-            if not result.get("streamed"):
-                await ws.send_json({"type":"delta","content":result["message"]})
+            result=await answer_task; provider_result=result; provider_metadata_result=result.pop("_billing",{})
+            if not result.get("streamed"): await ws.send_json({"type":"delta","content":result["message"]})
             await ws.send_json({"type":"done","conversation_id":result["conversation_id"],"model":result["model"],"route":result.get("route"),"module":result.get("module"),"image":result.get("image"),"usage":result["usage"]})
-    except WebSocketDisconnect: pass
+            transition_usage_reservation(billing["id"],"succeeded",actual_cost=provider_metadata_result.get("actual_cost"),provider=provider_metadata_result.get("provider"),model=result.get("model"),request_id=provider_metadata_result.get("request_id"),response=result)
+            billing=None; provider_result=None; provider_metadata_result={}
+    except WebSocketDisconnect:
+        db.rollback()
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if provider_result or completed:
+                metadata=provider_metadata_result or completed or {}
+                transition_usage_reservation(billing["id"],"provider_completed_client_disconnected",actual_cost=metadata.get("actual_cost"),provider=metadata.get("provider"),model=(provider_result or {}).get("model") or metadata.get("model"),request_id=metadata.get("request_id"),response=provider_result,error_code="client_disconnected")
+            else:
+                transition_usage_reservation(billing["id"],"cancelled",error_code="client_disconnected",refund=True)
     except HTTPException as exc:
         db.rollback()
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if completed: transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code=f"provider_completed_http_{exc.status_code}")
+            else: transition_usage_reservation(billing["id"],"failed",error_code=f"http_{exc.status_code}"); transition_usage_reservation(billing["id"],"refunded",error_code=f"http_{exc.status_code}",refund=True)
+            billing=None
         detail=exc.detail
         message=detail.get("message","Erro ao processar a solicitação.") if isinstance(detail,dict) else str(detail)
         with suppress(Exception): await ws.send_json({"type":"error","content":message})
     except Exception:
         db.rollback(); logger.exception("Falha inesperada no chat em tempo real")
+        if billing:
+            completed=reservation_provider_result(billing["id"])
+            if completed: transition_usage_reservation(billing["id"],"failed",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="provider_completed_unexpected_error")
+            else: transition_usage_reservation(billing["id"],"failed",error_code="unexpected_error"); transition_usage_reservation(billing["id"],"refunded",error_code="unexpected_error",refund=True)
+            billing=None
         with suppress(Exception): await ws.send_json({"type":"error","content":"Não foi possível concluir a resposta. Tente novamente em instantes."})
     finally:
         if answer_task and not answer_task.done():
             answer_task.cancel()
             with suppress(asyncio.CancelledError): await answer_task
             db.rollback()
+            if billing:
+                completed=reservation_provider_result(billing["id"])
+                if completed: transition_usage_reservation(billing["id"],"provider_completed_client_disconnected",actual_cost=completed.get("actual_cost"),provider=completed.get("provider"),model=completed.get("model"),request_id=completed.get("request_id"),error_code="connection_closed")
+                else: transition_usage_reservation(billing["id"],"cancelled",error_code="connection_closed",refund=True)
         db.close()
 @app.post(API+"/billing/checkout")
 def checkout(plan:str,user=Depends(require_roles("owner","admin","superadmin")),db:Session=Depends(get_db)):
@@ -1169,7 +1420,26 @@ async def webhook(request:Request,db:Session=Depends(get_db)):
             db.commit()
     return {"received":True}
 @app.get(API+"/admin/companies")
-def admin_companies(user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)): return [dump(x) for x in db.scalars(select(Company).order_by(Company.created_at.desc())).all()]
+def admin_companies(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    result=[dump(x) for x in db.scalars(select(Company).order_by(Company.created_at.desc())).all()]
+    add_admin_audit(db,request,"financial_accounts_viewed",user,details={"companies":len(result)}); db.commit(); return result
 @app.get(API+"/admin/ai-usage")
-def admin_ai_usage(limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
-    return [dump(item) for item in db.scalars(select(AIUsageLedger).order_by(AIUsageLedger.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+def admin_ai_usage(request:Request,limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    result=[dump(item) for item in db.scalars(select(AIUsageLedger).order_by(AIUsageLedger.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+    add_admin_audit(db,request,"financial_usage_viewed",user,details={"rows":len(result)}); db.commit(); return result
+@app.get(API+"/admin/provider-prices")
+def admin_provider_prices(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    result=[dump(item) for item in db.scalars(select(ProviderPrice).order_by(ProviderPrice.provider,ProviderPrice.model,ProviderPrice.valid_from.desc())).all()]
+    add_admin_audit(db,request,"provider_prices_viewed",user,details={"rows":len(result)}); db.commit(); return result
+@app.post(API+"/admin/provider-prices",status_code=201)
+def admin_create_provider_price(data:ProviderPriceIn,request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    now_value=data.valid_from or datetime.now(timezone.utc)
+    current=db.scalar(select(ProviderPrice).where(ProviderPrice.provider==data.provider,ProviderPrice.model==data.model,ProviderPrice.operation==data.operation,ProviderPrice.valid_until==None).order_by(ProviderPrice.valid_from.desc()).limit(1))
+    if current: current.valid_until=now_value
+    item=ProviderPrice(**data.model_dump(exclude={"valid_from"}),valid_from=now_value); db.add(item)
+    add_admin_audit(db,request,"provider_price_created",user,details={"provider":data.provider,"model":data.model,"operation":data.operation,"valid_from":now_value.isoformat()})
+    db.commit(); db.refresh(item); return dump(item)
+@app.get(API+"/admin/audit")
+def admin_audit(request:Request,limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    result=[dump(item) for item in db.scalars(select(AdminAuditLog).order_by(AdminAuditLog.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+    add_admin_audit(db,request,"admin_audit_viewed",user,details={"rows":len(result)}); db.commit(); return result

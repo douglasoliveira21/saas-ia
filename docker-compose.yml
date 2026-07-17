@@ -40,7 +40,7 @@ services:
   worker:
     build: ./backend
     restart: unless-stopped
-    command: celery -A app.worker.celery worker --loglevel=info
+    command: celery -A app.worker.celery worker --beat --loglevel=info
     env_file: .env
     environment:
       RAG_PGVECTOR_ENABLED: ${RAG_PGVECTOR_ENABLED:-true}

@@ -1,4 +1,4 @@
-import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib, math, time
+import asyncio, base64, csv, json, logging, pathlib, re, secrets, unicodedata, hashlib, math, time, shutil
 from contextlib import suppress
 import smtplib
 from email.message import EmailMessage
@@ -8,9 +8,9 @@ from html import escape as html_escape
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File as Upload, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse, PlainTextResponse
 from cryptography.fernet import Fernet
-from sqlalchemy import select, func, or_, delete
+from sqlalchemy import select, func, or_, delete, text as sql_text
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import Session
 import httpx, stripe
@@ -31,9 +31,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from bs4 import BeautifulSoup
 from app.config import settings
 from app.database import get_db, SessionLocal
-from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, AIUsageLedger, AIUsageReservation, ProviderPrice, PasswordResetToken, AdminAuditLog, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
+from app.models import Company, User, RefreshToken, Invitation, Agent, Folder, Conversation, Message, File, UsageLog, AIUsageLedger, AIUsageReservation, ProviderPrice, PasswordResetToken, AdminAuditLog, StripeWebhookEvent, SystemAlert, UserMemory, TrainingSample, MicrosoftConnection, AnonymousAllowance
 from app.rag import INDEXABLE_MIMES, embed_texts, retrieve_chunks
-from app.worker import process_document
+from app.worker import process_document, reconcile_stale_reservations
 from app.schemas import Register, Login, Refresh, AgentIn, InviteIn, AcceptInvite, FolderIn, UpdateConversation, ChatIn, AnonymousChatIn, AnonymousStatusIn, UserSettingsIn, AdminUserUpdate, PasswordForgotIn, PasswordResetIn, ProviderPriceIn
 from app.security import hash_password, verify_password, create_token, random_token, token_hash, current_user, require_roles
 from jose import jwt, JWTError
@@ -410,7 +410,7 @@ def transition_usage_reservation(reservation_id:str,status:str,*,actual_cost:flo
         if refund:
             if item.company_id and item.reserved_credits:
                 company=transition_db.scalar(select(Company).where(Company.id==item.company_id).with_for_update())
-                company.credit_balance+=item.reserved_credits; company.api_budget_used=max(0,float(company.api_budget_used)-float(item.estimated_cost))
+                company.credit_balance=min(PLANS.get(company.plan,PLANS["free"])["credits"],company.credit_balance+item.reserved_credits); company.api_budget_used=max(0,float(company.api_budget_used)-float(item.estimated_cost))
             elif item.anonymous_device_hash and item.reserved_credits:
                 allowance=transition_db.scalar(select(AnonymousAllowance).where(AnonymousAllowance.device_hash==item.anonymous_device_hash).with_for_update())
                 if allowance: allowance.credit_balance+=item.reserved_credits; allowance.api_budget_used=max(0,float(allowance.api_budget_used)-float(item.estimated_cost)); allowance.updated_at=datetime.now(timezone.utc)
@@ -700,6 +700,19 @@ def queue_index(file_id,strict=False):
         return None
 @app.get("/health")
 def health(): return {"status":"ok","service":settings.app_name}
+@app.get("/health/live")
+def health_live(): return {"status":"ok","service":settings.app_name}
+@app.get("/health/ready")
+async def health_ready():
+    checks={"database":False,"redis":False}
+    probe=SessionLocal()
+    try: probe.execute(sql_text("SELECT 1")); checks["database"]=True
+    except Exception: logger.exception("Database readiness check failed")
+    finally: probe.close()
+    try: checks["redis"]=bool(await rate_redis.ping())
+    except RedisError: logger.exception("Redis readiness check failed")
+    if not all(checks.values()): raise HTTPException(503,{"status":"not_ready","checks":checks})
+    return {"status":"ready","checks":checks}
 @app.post(API+"/auth/register",status_code=201)
 async def register(data:Register,request:Request,db:Session=Depends(get_db)):
     await enforce_rate_limit("register",request_ip(request),5,3600)
@@ -1403,29 +1416,74 @@ async def webhook(request:Request,db:Session=Depends(get_db)):
     payload=await request.body(); sig=request.headers.get("stripe-signature","")
     try: event=stripe.Webhook.construct_event(payload,sig,settings.stripe_webhook_secret)
     except Exception: raise HTTPException(400,"Webhook inválido")
-    obj=event["data"]["object"]; cid=(obj.get("metadata") or {}).get("company_id")
-    if event["type"]=="invoice.paid" and obj.get("subscription"):
-        company=db.scalar(select(Company).where(Company.stripe_subscription_id==obj.get("subscription")))
+    event_id=str(event.get("id") or ""); event_type=str(event.get("type") or ""); event_created=int(event.get("created") or 0); payload_hash=hashlib.sha256(payload).hexdigest()
+    if not event_id or not event_type: raise HTTPException(400,"Evento Stripe incompleto")
+    stream="invoice" if event_type.startswith("invoice.") else "subscription" if event_type.startswith("customer.subscription.") or event_type=="checkout.session.completed" else "other"
+    record=db.get(StripeWebhookEvent,event_id)
+    if record and record.payload_hash!=payload_hash: raise HTTPException(400,"O conteúdo deste event ID não corresponde ao evento recebido anteriormente")
+    if record and record.status in {"processed","ignored"}: return {"received":True,"duplicate":True,"status":record.status}
+    if record and record.status=="processing" and record.received_at>datetime.now(timezone.utc)-timedelta(minutes=5): return {"received":True,"duplicate":True,"status":"processing"}
+    if not record:
+        record=StripeWebhookEvent(event_id=event_id,event_type=event_type,event_created=event_created,stream=stream,payload_hash=payload_hash,status="processing")
+        db.add(record)
+        try: db.flush()
+        except IntegrityError:
+            db.rollback(); existing=db.get(StripeWebhookEvent,event_id)
+            return {"received":True,"duplicate":True,"status":existing.status if existing else "processing"}
+    else:
+        record.status="processing"; record.error=None
+    db.commit(); record=db.scalar(select(StripeWebhookEvent).where(StripeWebhookEvent.event_id==event_id).with_for_update())
+    obj=event["data"]["object"]; metadata=dict(obj.get("metadata") or {}); metadata.update(dict((obj.get("subscription_details") or {}).get("metadata") or {}))
+    cid=metadata.get("company_id"); subscription_id=obj.get("subscription") or (obj.get("id") if event_type.startswith("customer.subscription.") else None); customer_id=obj.get("customer")
+    company=db.get(Company,cid) if cid else None
+    if not company and subscription_id: company=db.scalar(select(Company).where(Company.stripe_subscription_id==subscription_id))
+    if not company and customer_id: company=db.scalar(select(Company).where(Company.stripe_customer_id==customer_id))
+    record.company_id=company.id if company else cid
+    try:
+        supported_types={"checkout.session.completed","customer.subscription.created","customer.subscription.updated","customer.subscription.deleted","invoice.payment_failed","invoice.paid"}
+        if event_type in supported_types and not company: raise RuntimeError("company_not_found")
+        if company and stream!="other":
+            newer=db.scalar(select(func.max(StripeWebhookEvent.event_created)).where(StripeWebhookEvent.company_id==company.id,StripeWebhookEvent.stream==stream,StripeWebhookEvent.status=="processed",StripeWebhookEvent.event_id!=event_id))
+            if newer is not None and event_created<newer:
+                record.status="ignored"; record.error="out_of_order"; record.processed_at=datetime.now(timezone.utc); db.commit()
+                return {"received":True,"ignored":True,"reason":"out_of_order"}
+        supported=False
         if company:
-            limits=PLANS.get(company.plan,PLANS["free"]); company.credit_balance=limits["credits"]; company.api_budget_used=0; db.commit()
-    if cid:
-        company=db.get(Company,cid)
-        if company:
-            company.stripe_customer_id=obj.get("customer") or company.stripe_customer_id; company.stripe_subscription_id=obj.get("subscription") or obj.get("id") or company.stripe_subscription_id
-            if event["type"]=="customer.subscription.deleted": company.status="canceled"
-            elif event["type"]=="invoice.payment_failed": company.status="past_due"
-            else:
-                company.status="active"; new_plan=(obj.get("metadata") or {}).get("plan",company.plan)
-                if new_plan!=company.plan: company.plan=new_plan; company.credit_balance=PLANS.get(new_plan,PLANS["free"])["credits"]; company.api_budget_used=0
-            db.commit()
-    return {"received":True}
+            company.stripe_customer_id=customer_id or company.stripe_customer_id; company.stripe_subscription_id=subscription_id or company.stripe_subscription_id
+            if event_type=="checkout.session.completed":
+                supported=True; company.status="active"
+                plan=metadata.get("plan")
+                if plan in PLANS and plan!=company.plan: company.plan=plan
+            elif event_type in {"customer.subscription.created","customer.subscription.updated"}:
+                supported=True; stripe_status=str(obj.get("status") or "active")
+                company.status={"active":"active","trialing":"active","past_due":"past_due","unpaid":"past_due","canceled":"canceled","incomplete":"past_due","incomplete_expired":"canceled"}.get(stripe_status,stripe_status)
+                plan=metadata.get("plan")
+                if plan in PLANS and plan!=company.plan: company.plan=plan
+            elif event_type=="customer.subscription.deleted":
+                supported=True; company.status="canceled"
+            elif event_type=="invoice.payment_failed":
+                supported=True; company.status="past_due"
+            elif event_type=="invoice.paid" and subscription_id:
+                supported=True; company.status="active"; limits=PLANS.get(company.plan,PLANS["free"]); company.credit_balance=limits["credits"]; company.api_budget_used=0
+        record.status="processed" if supported else "ignored"; record.error=None if supported else "unsupported_or_company_not_found"; record.processed_at=datetime.now(timezone.utc); db.commit()
+        return {"received":True,"status":record.status}
+    except Exception as exc:
+        db.rollback()
+        failed=db.get(StripeWebhookEvent,event_id)
+        if failed: failed.status="failed"; failed.error=str(exc)[:1000]; failed.processed_at=datetime.now(timezone.utc); db.commit()
+        logger.exception("Stripe webhook processing failed event=%s",event_id)
+        raise HTTPException(500,"Falha ao processar webhook")
 @app.get(API+"/admin/companies")
 def admin_companies(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
     result=[dump(x) for x in db.scalars(select(Company).order_by(Company.created_at.desc())).all()]
     add_admin_audit(db,request,"financial_accounts_viewed",user,details={"companies":len(result)}); db.commit(); return result
 @app.get(API+"/admin/ai-usage")
-def admin_ai_usage(request:Request,limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
-    result=[dump(item) for item in db.scalars(select(AIUsageLedger).order_by(AIUsageLedger.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+def admin_ai_usage(request:Request,limit:int=200,status:str|None=None,provider:str|None=None,operation:str|None=None,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    query=select(AIUsageLedger)
+    if status: query=query.where(AIUsageLedger.status==status)
+    if provider: query=query.where(AIUsageLedger.provider==provider)
+    if operation: query=query.where(AIUsageLedger.operation==operation)
+    result=[dump(item) for item in db.scalars(query.order_by(AIUsageLedger.created_at.desc()).limit(min(max(limit,1),1000))).all()]
     add_admin_audit(db,request,"financial_usage_viewed",user,details={"rows":len(result)}); db.commit(); return result
 @app.get(API+"/admin/provider-prices")
 def admin_provider_prices(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
@@ -1440,6 +1498,60 @@ def admin_create_provider_price(data:ProviderPriceIn,request:Request,user=Depend
     add_admin_audit(db,request,"provider_price_created",user,details={"provider":data.provider,"model":data.model,"operation":data.operation,"valid_from":now_value.isoformat()})
     db.commit(); db.refresh(item); return dump(item)
 @app.get(API+"/admin/audit")
-def admin_audit(request:Request,limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
-    result=[dump(item) for item in db.scalars(select(AdminAuditLog).order_by(AdminAuditLog.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+def admin_audit(request:Request,limit:int=200,action:str|None=None,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    query=select(AdminAuditLog)
+    if action: query=query.where(AdminAuditLog.action==action)
+    result=[dump(item) for item in db.scalars(query.order_by(AdminAuditLog.created_at.desc()).limit(min(max(limit,1),1000))).all()]
     add_admin_audit(db,request,"admin_audit_viewed",user,details={"rows":len(result)}); db.commit(); return result
+@app.get(API+"/admin/stripe-events")
+def admin_stripe_events(request:Request,limit:int=200,status:str|None=None,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    query=select(StripeWebhookEvent)
+    if status: query=query.where(StripeWebhookEvent.status==status)
+    result=[dump(item) for item in db.scalars(query.order_by(StripeWebhookEvent.received_at.desc()).limit(min(max(limit,1),1000))).all()]
+    add_admin_audit(db,request,"stripe_events_viewed",user,details={"rows":len(result)}); db.commit(); return result
+@app.get(API+"/admin/alerts")
+def admin_alerts(request:Request,status:str="open",limit:int=200,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    query=select(SystemAlert)
+    if status!="all": query=query.where(SystemAlert.status==status)
+    result=[dump(item) for item in db.scalars(query.order_by(SystemAlert.created_at.desc()).limit(min(max(limit,1),1000))).all()]
+    add_admin_audit(db,request,"system_alerts_viewed",user,details={"rows":len(result),"status":status}); db.commit(); return result
+@app.post(API+"/admin/alerts/{alert_id}/resolve")
+def resolve_alert(alert_id:str,request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    item=db.get(SystemAlert,alert_id)
+    if not item: raise HTTPException(404,"Alerta não encontrado")
+    item.status="resolved"; item.resolved_at=datetime.now(timezone.utc); add_admin_audit(db,request,"system_alert_resolved",user,details={"alert_id":item.id,"kind":item.kind}); db.commit(); return {"message":"Alerta resolvido"}
+@app.get(API+"/admin/monitoring")
+async def admin_monitoring(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    now_value=datetime.now(timezone.utc); since=now_value-timedelta(hours=24); stale_cutoff=now_value-timedelta(minutes=max(5,settings.reservation_stale_minutes))
+    reservation_counts=dict(db.execute(select(AIUsageReservation.status,func.count()).group_by(AIUsageReservation.status)).all())
+    last_day=dict(db.execute(select(AIUsageLedger.status,func.count()).where(AIUsageLedger.created_at>=since).group_by(AIUsageLedger.status)).all())
+    avg_latency=float(db.scalar(select(func.coalesce(func.avg(AIUsageLedger.latency_ms),0)).where(AIUsageLedger.created_at>=since,AIUsageLedger.status=="succeeded")) or 0)
+    cost=float(db.scalar(select(func.coalesce(func.sum(func.coalesce(AIUsageLedger.actual_cost,AIUsageLedger.estimated_cost)),0)).where(AIUsageLedger.created_at>=since,AIUsageLedger.status.in_(["succeeded","provider_completed_client_disconnected"]))) or 0)
+    stale=db.scalar(select(func.count()).select_from(AIUsageReservation).where(AIUsageReservation.status.in_(["reserved","processing"]),AIUsageReservation.updated_at<stale_cutoff)) or 0
+    stripe_failed=db.scalar(select(func.count()).select_from(StripeWebhookEvent).where(StripeWebhookEvent.status=="failed")) or 0
+    open_alerts=db.scalar(select(func.count()).select_from(SystemAlert).where(SystemAlert.status=="open")) or 0
+    heartbeat=None; heartbeat_ttl=-2; queue_depth=0; redis_ok=False
+    try:
+        redis_ok=bool(await rate_redis.ping()); heartbeat=await rate_redis.get("monitor:worker:heartbeat"); heartbeat_ttl=await rate_redis.ttl("monitor:worker:heartbeat"); queue_depth=int(await rate_redis.llen("celery"))
+    except RedisError: logger.exception("Monitoring Redis probe failed")
+    disk=shutil.disk_usage("storage")
+    result={"generated_at":now_value,"services":{"database":True,"redis":redis_ok,"worker":bool(heartbeat and heartbeat_ttl>0),"worker_heartbeat":heartbeat,"worker_heartbeat_ttl":heartbeat_ttl},"queue_depth":queue_depth,"storage":{"total":disk.total,"used":disk.used,"free":disk.free,"percent":round(disk.used/disk.total*100,2)},"reservations":reservation_counts,"last_24h":last_day,"stale_reservations":stale,"stripe_failed":stripe_failed,"open_alerts":open_alerts,"average_latency_ms":round(avg_latency,1),"cost_24h":round(cost,4),"providers":{"deepinfra":bool(settings.deepinfra_api_key),"bfl":bool(settings.bfl_api_key),"mistral":bool(settings.mistral_api_key),"tavily":bool(settings.tavily_api_key)}}
+    add_admin_audit(db,request,"monitoring_viewed",user,details={"stale":stale,"alerts":open_alerts}); db.commit(); return result
+@app.post(API+"/admin/reconcile-reservations")
+def run_reservation_reconciliation(request:Request,user=Depends(require_roles("superadmin")),db:Session=Depends(get_db)):
+    task=reconcile_stale_reservations.delay(); add_admin_audit(db,request,"reservation_reconciliation_requested",user,details={"task_id":task.id}); db.commit(); return {"message":"Reconciliação enviada ao worker","task_id":task.id}
+@app.get("/metrics",response_class=PlainTextResponse)
+async def metrics(request:Request):
+    if not settings.monitoring_token: raise HTTPException(503,"MONITORING_TOKEN não configurado")
+    if request.headers.get("authorization")!=f"Bearer {settings.monitoring_token}": raise HTTPException(401,"Token de monitoramento inválido")
+    db=SessionLocal()
+    try:
+        stale_cutoff=datetime.now(timezone.utc)-timedelta(minutes=max(5,settings.reservation_stale_minutes))
+        stale=db.scalar(select(func.count()).select_from(AIUsageReservation).where(AIUsageReservation.status.in_(["reserved","processing"]),AIUsageReservation.updated_at<stale_cutoff)) or 0
+        alerts=db.scalar(select(func.count()).select_from(SystemAlert).where(SystemAlert.status=="open")) or 0
+        failed=db.scalar(select(func.count()).select_from(StripeWebhookEvent).where(StripeWebhookEvent.status=="failed")) or 0
+        queue_depth=0; worker_up=0
+        try: queue_depth=int(await rate_redis.llen("celery")); worker_up=1 if await rate_redis.get("monitor:worker:heartbeat") else 0
+        except RedisError: pass
+        return "\n".join(["# TYPE solvitsoft_stale_reservations gauge",f"solvitsoft_stale_reservations {stale}","# TYPE solvitsoft_open_alerts gauge",f"solvitsoft_open_alerts {alerts}","# TYPE solvitsoft_stripe_failed_events gauge",f"solvitsoft_stripe_failed_events {failed}","# TYPE solvitsoft_celery_queue_depth gauge",f"solvitsoft_celery_queue_depth {queue_depth}","# TYPE solvitsoft_worker_up gauge",f"solvitsoft_worker_up {worker_up}",""])
+    finally: db.close()

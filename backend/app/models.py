@@ -83,6 +83,15 @@ class AdminAuditLog(Base):
     __tablename__="admin_audit_log"; __table_args__=(Index("ix_admin_audit_created","created_at"),)
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); actor_user_id: Mapped[str|None]=mapped_column(String(36),index=True); target_user_id: Mapped[str|None]=mapped_column(String(36),index=True); company_id: Mapped[str|None]=mapped_column(String(36),index=True)
     action: Mapped[str]=mapped_column(String(80),index=True); details: Mapped[dict]=mapped_column(JSON,default=dict); ip_address: Mapped[str|None]=mapped_column(String(80)); user_agent: Mapped[str|None]=mapped_column(String(500)); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+class StripeWebhookEvent(Base):
+    __tablename__="stripe_webhook_events"
+    event_id: Mapped[str]=mapped_column(String(255),primary_key=True); event_type: Mapped[str]=mapped_column(String(100),index=True); event_created: Mapped[int]=mapped_column(Integer,index=True); stream: Mapped[str]=mapped_column(String(40),index=True)
+    company_id: Mapped[str|None]=mapped_column(String(36),index=True); payload_hash: Mapped[str]=mapped_column(String(64)); status: Mapped[str]=mapped_column(String(30),index=True); error: Mapped[str|None]=mapped_column(Text)
+    received_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); processed_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+class SystemAlert(Base):
+    __tablename__="system_alerts"; __table_args__=(Index("ix_system_alerts_status_created","status","created_at"),)
+    id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); kind: Mapped[str]=mapped_column(String(80),index=True); severity: Mapped[str]=mapped_column(String(20),index=True); status: Mapped[str]=mapped_column(String(20),default="open",index=True)
+    message: Mapped[str]=mapped_column(Text); details: Mapped[dict]=mapped_column(JSON,default=dict); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); resolved_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
 class AnonymousAllowance(Base):
     __tablename__="anonymous_allowances"
     id: Mapped[str]=mapped_column(String(36),primary_key=True,default=uid); device_hash: Mapped[str]=mapped_column(String(64),unique=True,index=True); ip_hash: Mapped[str]=mapped_column(String(64),index=True); credit_balance: Mapped[int]=mapped_column(Integer,default=100); api_budget_used: Mapped[float]=mapped_column(Float,default=0); created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)

@@ -103,6 +103,27 @@ Importante: `NEXT_PUBLIC_API_URL` é incorporada no build do frontend. Depois de
 
 1. Crie uma API key no painel DeepInfra.
 2. Preencha `DEEPINFRA_API_KEY` no backend e worker.
+
+### Worker, reconciliação e monitoramento
+
+O worker também executa o agendador das rotinas operacionais. No EasyPanel use este comando:
+
+```bash
+celery -A app.worker.celery worker --beat --loglevel=info
+```
+
+Variáveis recomendadas no backend e worker:
+
+```env
+RESERVATION_STALE_MINUTES=30
+MONITORING_TOKEN=gere-um-token-longo-e-aleatorio
+```
+
+- `GET /health/live`: processo ativo.
+- `GET /health/ready`: PostgreSQL e Redis prontos.
+- `GET /metrics`: métricas Prometheus; envie `Authorization: Bearer <MONITORING_TOKEN>`.
+- A reconciliação de reservas roda a cada cinco minutos.
+- O heartbeat do worker é atualizado no Redis a cada 30 segundos.
 3. Confirme que `DEFAULT_AI_MODEL` é um identificador disponível na conta.
 4. Reinicie backend e worker e teste pelo dashboard.
 
